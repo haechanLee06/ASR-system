@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Flask/SQLite
+voice_data.db
+instance/
+
+# Uploads
+app/static/uploads/
+!app/static/uploads/.gitkeep
+app/static/uploads/temp/
+
+# IDE/OS
+.DS_Store
+.vscode/
+.idea/
+

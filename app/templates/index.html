@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}首页 · 语音转录及分析系统{% endblock %}
+{% block content %}
+  <div class="alert alert-success" role="alert">系统环境搭建成功！</div>
+
+  <div class="card mb-4">
+    <div class="card-header">上传新录音</div>
+    <div class="card-body">
+      <form id="upload-form" action="/upload" method="post" enctype="multipart/form-data" class="row g-3">
+        <div class="col-sm-6 col-md-4">
+          <input class="form-control" type="file" name="file" accept="audio/*" required>
+        </div>
+        <div class="col-auto">
+          <button id="upload-btn" class="btn btn-primary" type="submit">上传并转码为16k WAV</button>
+        </div>
+        <div class="col-auto" id="upload-status" style="display:none;">
+          <span class="text-muted">正在处理/转码中...</span>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-striped align-middle">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>文件名</th>
+          <th>时长(秒)</th>
+          <th>状态</th>
+          <th>上传时间</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in records %}
+        <tr>
+          <td>{{ r.id }}</td>
+          <td>{{ r.filename }}</td>
+          <td>{{ '%.2f' % (r.duration or 0) }}</td>
+          <td>{{ r.status }}</td>
+          <td>{{ r.upload_time.strftime('%Y-%m-%d %H:%M:%S') if r.upload_time else '' }}</td>
+          <td>
+            <a class="btn btn-primary btn-sm" href="/detail/{{ r.id }}">查看分析</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    const form = document.getElementById('upload-form');
+    const btn = document.getElementById('upload-btn');
+    const statusEl = document.getElementById('upload-status');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      btn.disabled = true;
+      statusEl.style.display = 'inline-block';
+      try {
+        const fd = new FormData(form);
+        const res = await fetch('/upload', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (data.code === 200) {
+          window.location.reload();
+        } else {
+          alert(data.msg || '上传失败');
+        }
+      } catch (err) {
+        alert('网络错误');
+      } finally {
+        btn.disabled = false;
+        statusEl.style.display = 'none';
+      }
+    });
+  </script>
+{% endblock %}
+
