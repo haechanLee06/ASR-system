@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .venv/
+.funasr-venv/
 
 # Flask/SQLite
 voice_data.db
@@ -11,6 +12,11 @@ instance/
 app/static/uploads/
 !app/static/uploads/.gitkeep
 app/static/uploads/temp/
+app/static/separated/
+
+# Local models and outputs
+models/
+outputs/
 
 # IDE/OS
 .DS_Store

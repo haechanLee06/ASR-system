@@ -21,11 +21,12 @@
   </div>
 
   <div class="table-responsive">
+    <!-- 历史录音列表 -->
     <table class="table table-striped align-middle">
       <thead>
         <tr>
           <th>ID</th>
-          <th>文件名</th>
+          <th style="width: 30%">文件名</th>
           <th>时长(秒)</th>
           <th>状态</th>
           <th>上传时间</th>
@@ -36,7 +37,7 @@
         {% for r in records %}
         <tr>
           <td>{{ r.id }}</td>
-          <td>{{ r.filename }}</td>
+          <td class="text-truncate" style="max-width: 320px;" title="{{ r.original_filename }}">{{ r.original_filename }}</td>
           <td>{{ '%.2f' % (r.duration or 0) }}</td>
           <td>{{ r.status }}</td>
           <td>{{ r.upload_time.strftime('%Y-%m-%d %H:%M:%S') if r.upload_time else '' }}</td>

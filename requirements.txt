@@ -1,4 +1,9 @@
 Flask==2.3.3
 Flask-SQLAlchemy==3.1.1
 SQLAlchemy==2.0.36
+requests==2.31.0
+torch
+torchaudio
+funasr
+modelscope
 
