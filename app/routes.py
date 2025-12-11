@@ -18,7 +18,7 @@ def index():
     records = AudioRecord.query.order_by(AudioRecord.upload_time.desc()).all()
     return render_template("index.html", records=records)
 
-@main.route("/upload", methods=["POST"])
+@main.route("/audio/upload", methods=["POST"])
 def upload():
     def _ensure_dir(p):
         os.makedirs(p, exist_ok=True)
