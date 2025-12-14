@@ -1,9 +1,16 @@
 from datetime import datetime
 from . import db
 
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    password_hash = db.Column(db.String(256), nullable=False)
+
 class AudioRecord(db.Model):
     # 主键ID
     id = db.Column(db.Integer, primary_key=True)
+    # 归属用户，可为空以兼容旧数据和未迁移库
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
     # 用户上传时的原始文件名，例如 "test.mp3"
     original_filename = db.Column(db.String(256), nullable=False)
     # 服务器本地存储的相对路径，例如 "static/uploads/xxx.wav"

@@ -1,4 +1,4 @@
-# 开发日志（ASR-system）
+# 后端开发日志（ASR-system）
 
 ## 项目概览
 - 技术栈：Flask + SQLAlchemy、FFmpeg、WSL2、FunASR（本地模型）
@@ -39,6 +39,18 @@
    - 容忍 AI 脚本 stdout 混有调试输出，从中提取有效 JSON
 6. 跨域支持
    - 安装并启用 `flask-cors`，支持 Vue 前端跨域联调
+
+7. 前后端接口对齐
+   - 统一上传路由为 `/upload`（同时兼容 `/audio/upload` 别名）
+   - 修正返回 JSON 字段：将数据库 `DialogueSegment.content` 映射为响应 `text`
+   - 验证静态资源服务：`/static/separated/<record_id>/<index>.wav` 可被前端直接访问
+
+8. 系统化改造（多用户与认证）
+   - 引入 JWT 认证（`flask-jwt-extended`），在 `create_app` 中初始化 `JWTManager`
+   - 新增 `User` 模型（`username`、`password_hash`），`AudioRecord` 增加可空 `user_id` 外键
+   - 认证接口：`POST /auth/register`、`POST /auth/login`，登录返回 `access_token`
+   - 保护业务接口：`POST /upload`、`GET /history` 添加 `@jwt_required()`；上传关联当前用户，查询仅返回该用户记录
+   - 兼容旧库：运行时检测表结构是否包含 `audio_record.user_id`，缺失时不强制写入并提示迁移
 
 ## 接口与流程
 - `GET /`（首页）：列出上传记录（`app/routes.py:11`）
@@ -119,3 +131,13 @@
 - AI 脚本输出含调试时，后端会从 stdout 中提取最后一个合法 JSON；若解析失败，查看终端头部日志定位问题
 - `.gitignore` 已忽略本地 venv、模型与输出目录，避免提交庞大文件
 
+9. 详情接口
+   - 新增 `GET /record/<int:record_id>`，需要认证
+   - 校验记录归属当前用户并按开始时间返回分段详情
+   - 返回 `info` 与 `segments`，段内 `path` 为相对路径供前端拼接
+
+10. 识别体验优化
+   - 引入独立标点恢复层：加载 `punc_ct-transformer_zh-cn-common-vocab272727-pytorch`，在四川话识别后与段合并后分别执行标点恢复
+   - 调整 VAD 参数：`max_single_segment_time=60000`、`max_end_silence_chunk=800`，提升停顿容忍度，降低过度切割
+   - 新增后处理合并：相邻同说话人且间隔 < 0.3s 的短片段合并；若上一段以 `？/！` 结尾则不合并；合并后再进行标点恢复
+   - 文本清洗：正则去重堆叠标点，修复怪异组合，去除行首标点

@@ -5,6 +5,8 @@ import shutil
 import subprocess
 from datetime import datetime
 from flask import Blueprint, render_template, request, jsonify, current_app
+from flask_jwt_extended import jwt_required, get_jwt_identity
+from sqlalchemy import inspect
 from . import db
 from .models import AudioRecord, DialogueSegment, Split
 from .services.audio_handler import save_upload_file, convert_to_16k_wav
@@ -19,6 +21,8 @@ def index():
     return render_template("index.html", records=records)
 
 @main.route("/audio/upload", methods=["POST"])
+@main.route("/upload", methods=["POST"])
+@jwt_required()
 def upload():
     def _ensure_dir(p):
         os.makedirs(p, exist_ok=True)
@@ -120,6 +124,7 @@ def upload():
         print("[CONVERT] start convert to 16k wav...")
         rel_path, duration = convert_to_16k_wav(temp_path)
         print(f"[CONVERT] rel_path={rel_path}, duration={duration}")
+        current_user_id = int(get_jwt_identity())
         rec = AudioRecord(
             original_filename=file.filename,
             filename=rel_path,
@@ -127,6 +132,13 @@ def upload():
             upload_time=datetime.utcnow(),
             status="uploaded",
         )
+        try:
+            inspector = inspect(db.engine)
+            cols = [c['name'] for c in inspector.get_columns('audio_record')]
+            if 'user_id' in cols:
+                rec.user_id = current_user_id
+        except Exception:
+            pass
         db.session.add(rec)
         db.session.commit()
         print(f"[DB] audio record committed id={rec.id}")
@@ -212,10 +224,10 @@ def upload():
             db.session.add(split)
 
             payload.append({
-                "speaker": speaker,
-                "text": text,
+                "spk": speaker,
                 "start": start,
                 "end": end,
+                "text": seg.content,
                 "path": split.file_path,
             })
 
@@ -239,4 +251,67 @@ def upload():
 def detail(record_id):
     record = AudioRecord.query.get_or_404(record_id)
     return render_template("detail.html", record=record)
+
+@main.route("/history", methods=["GET"])
+@jwt_required()
+def history():
+    try:
+        inspector = inspect(db.engine)
+        cols = [c['name'] for c in inspector.get_columns('audio_record')]
+        q = AudioRecord.query
+        if 'user_id' in cols:
+            uid = int(get_jwt_identity())
+            q = q.filter_by(user_id=uid)
+        records = q.order_by(AudioRecord.upload_time.desc()).all()
+        data = []
+        for r in records:
+            data.append({
+                "id": r.id,
+                "filename": r.filename,
+                "original_filename": r.original_filename,
+                "duration": r.duration,
+                "upload_time": r.upload_time.isoformat(),
+                "status": r.status,
+            })
+        return jsonify({"code": 200, "data": data})
+    except Exception as e:
+        return jsonify({"code": 500, "msg": str(e)})
+
+@main.route("/record/<int:record_id>", methods=["GET"])
+@jwt_required()
+def record_detail(record_id):
+    try:
+        inspector = inspect(db.engine)
+        cols = [c['name'] for c in inspector.get_columns('audio_record')]
+        r = AudioRecord.query.get(record_id)
+        if r is None:
+            return jsonify({"code": 404, "msg": "记录不存在"}), 404
+        if 'user_id' in cols:
+            uid = int(get_jwt_identity())
+            if r.user_id is not None and r.user_id != uid:
+                return jsonify({"code": 403, "msg": "无权访问该记录"}), 403
+        segs = DialogueSegment.query.filter_by(record_id=record_id).order_by(DialogueSegment.start_time.asc()).all()
+        payload = []
+        for idx, s in enumerate(segs):
+            out_name = f"{idx+1:04d}.wav"
+            path = os.path.join("static", "separated", str(record_id), out_name).replace("\\", "/")
+            payload.append({
+                "id": s.id,
+                "spk": s.speaker,
+                "text": s.content,
+                "start": s.start_time,
+                "end": s.end_time,
+                "path": path,
+            })
+        data = {
+            "info": {
+                "id": r.id,
+                "filename": r.filename,
+                "upload_time": r.upload_time.isoformat(),
+            },
+            "segments": payload,
+        }
+        return jsonify({"code": 200, "data": data})
+    except Exception as e:
+        return jsonify({"code": 500, "msg": str(e)})
 

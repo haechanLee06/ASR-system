@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import traceback
+import re
 import logging
 
 # 屏蔽繁杂的日志
@@ -51,7 +52,12 @@ class AIServiceRunner:
                     model=path_a,
                     device=self.device,
                     vad_model=path_vad,
-                    vad_kwargs={"max_single_segment_time": 60000},
+                    vad_kwargs={
+                        "max_single_segment_time": 60000,
+                        "max_end_silence_chunk": 800,
+                        "vad_tail_silence": 600,
+                        "vad_max_len": 60000,
+                    },
                     punc_model=path_punc,
                     spk_model=path_spk,
                     disable_update=True,
@@ -66,6 +72,15 @@ class AIServiceRunner:
                     disable_update=True,
                 )
                 print("[AI] pipeline B ready")
+            if getattr(self, "punc_model", None) is None:
+                try:
+                    self.punc_model = self.AutoModel(
+                        model=path_punc,
+                        device=self.device,
+                        disable_update=True,
+                    )
+                except Exception:
+                    self.punc_model = None
         except Exception as e:
             raise RuntimeError(f"Model Init Failed: {str(e)}")
 
@@ -160,18 +175,62 @@ class AIServiceRunner:
                         # 解析 B 模型结果
                         if isinstance(res_b, list) and len(res_b) > 0:
                             text_content = res_b[0].get('text', '')
+                            if getattr(self, "punc_model", None) is not None and text_content:
+                                try:
+                                    punc_res = self.punc_model.generate(input=text_content)
+                                    if isinstance(punc_res, list) and len(punc_res) > 0:
+                                        text_content = punc_res[0].get('text', text_content)
+                                except Exception:
+                                    pass
                     except Exception as e:
                         text_content = f"[Err: {str(e)}]"
                 
+                # 清洗标点前先存原始文本
+                cleaned = text_content
+                if cleaned:
+                    # 合并重复标点、修复怪异组合、去除行首标点
+                    cleaned = re.sub(r'([。？！，、])\1+', r'\1', cleaned)
+                    cleaned = cleaned.replace("，。", "。").replace("？。", "？").replace("！。", "！")
+                    cleaned = cleaned.lstrip("。？！，、")
+
                 final_output.append({
                     "speaker": spk,
-                    "text": text_content,
+                    "text": cleaned,
                     "start": start,
                     "end": end
                 })
 
-            # 4. 输出标准 JSON
-            print(json.dumps(final_output, ensure_ascii=False))
+            merged = []
+            for item in final_output:
+                if not merged:
+                    merged.append(item)
+                    continue
+                prev = merged[-1]
+                gap = item["start"] - prev["end"]
+                prev_tail = prev["text"].rstrip()[-1:] if prev["text"] else ""
+                tail_stop = prev_tail in ("？", "！")
+                if prev["speaker"] == item["speaker"] and gap < 0.3 and not tail_stop:
+                    prev["text"] = (prev["text"] + " " + item["text"]).strip()
+                    prev["end"] = item["end"]
+                else:
+                    merged.append(item)
+
+            if getattr(self, "punc_model", None) is not None:
+                for m in merged:
+                    if m["text"]:
+                        try:
+                            punc_res2 = self.punc_model.generate(input=m["text"])
+                            if isinstance(punc_res2, list) and len(punc_res2) > 0:
+                                t2 = punc_res2[0].get('text', m["text"]) 
+                                # 再次清洗
+                                t2 = re.sub(r'([。？！，、])\1+', r'\1', t2)
+                                t2 = t2.replace("，。", "。").replace("？。", "？").replace("！。", "！")
+                                t2 = t2.lstrip("。？！，、")
+                                m["text"] = t2
+                        except Exception:
+                            pass
+
+            print(json.dumps(merged, ensure_ascii=False))
             print("[AI] done")
 
         except Exception as e:
