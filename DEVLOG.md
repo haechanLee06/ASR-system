@@ -87,9 +87,9 @@
   - `FFMPEG_BIN`（默认 `ffmpeg`）
   - `FFPROBE_BIN`（可选）
   - `WSL_DISTRO`（默认 `Ubuntu-20.04`）
-- WSL 回退执行（`app/routes.py`）
-  - `cd /mnt/c/.../my_voice_project && (.venv/bin/python || python3) app/services/ai_service.py '<wsl_audio>'`
-  - 兼容 `.venv` 与系统 `python3`
+- 执行策略（`app/utils/wsl_bridge.py`）
+  - Linux/WSL：本地直接执行 AI 脚本（使用当前解释器），不再通过 `wsl.exe`
+  - Windows：桥接到 WSL，转换路径并调用 `.venv/python` 或 `python3`
 - CORS（`app/__init__.py`）
   - `from flask_cors import CORS` → `CORS(app, resources={r"/*": {"origins": "*"}})`
 
@@ -108,12 +108,18 @@
 ## 使用与部署
 - 启动：
   ```bash
+  # Windows（直接python）
   python run.py
+  
+  # WSL（指定端口并清理占用）
+  cd /mnt/c/Users/asus/Desktop/毕业论文/ASR-system/my_voice_project
+  source .venv/bin/activate
+  fuser -k 5000/tcp || true
+  PORT=5000 python run.py
   ```
 - 上传：页面表单或前端 POST 到 `/upload`
 - WSL 依赖准备（如需）：
   ```bash
-  # 在 WSL 中
   sudo apt update && sudo apt install -y python3 python3-venv ffmpeg
   cd /mnt/c/Users/asus/Desktop/毕业论文/ASR-system/my_voice_project
   python3 -m venv .venv && source .venv/bin/activate
@@ -127,6 +133,7 @@
   - `models/lukeewin01/paraformer-large-sichuan-offline`
 
 ## 注意事项
+- 在 WSL 内直接运行后端时，`wsl_bridge.py` 走本地执行路径，避免重复 `/mnt` 前缀导致的路径错误
 - Windows 缺 `funasr` 时自动回退到 WSL 执行；确保 WSL `.venv` 安装了所需依赖
 - AI 脚本输出含调试时，后端会从 stdout 中提取最后一个合法 JSON；若解析失败，查看终端头部日志定位问题
 - `.gitignore` 已忽略本地 venv、模型与输出目录，避免提交庞大文件

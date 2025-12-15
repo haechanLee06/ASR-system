@@ -10,6 +10,7 @@ from sqlalchemy import inspect
 from . import db
 from .models import AudioRecord, DialogueSegment, Split
 from .services.audio_handler import save_upload_file, convert_to_16k_wav
+from .utils.wsl_bridge import run_in_wsl
 import threading
 
 main = Blueprint("main", __name__)
@@ -144,50 +145,10 @@ def upload():
         print(f"[DB] audio record committed id={rec.id}")
 
         abs_in = os.path.join(current_app.root_path, rel_path)
-        py = sys.executable
-        ai_script = os.path.join(current_app.root_path, "services", "ai_service.py")
-        cmd = [py, ai_script, abs_in]
-        print(f"[AI] invoking: {cmd}")
-        env = os.environ.copy()
-        for k in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
-            env.pop(k, None)
-        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", env=env)
-        print(f"[AI] returncode={proc.returncode}")
-        print(f"[AI] stdout_head={proc.stdout[:200]}")
-        print(f"[AI] stderr_head={proc.stderr[:200]}")
-
-        result = None
-        if proc.returncode == 0:
-            result = _extract_json_from_output(proc.stdout)
-            if result is not None:
-                print(f"[AI] parsed items={len(result)}")
-            else:
-                print(f"[AI] parse failed, stdout_head={proc.stdout[:200]}")
-        
-        if result is None:
-            print("[AI] fallback to WSL Python")
-            distro = current_app.config.get("WSL_DISTRO", "Ubuntu-20.04")
-            base_root = os.path.dirname(current_app.root_path)
-            wsl_root = _win_to_wsl(base_root)
-            wsl_audio = _win_to_wsl(abs_in)
-            cmd_wsl = [
-                "wsl", "-d", distro, "--", "bash", "-lc",
-                f"cd '{wsl_root}' && if [ -x .venv/bin/python ]; then .venv/bin/python app/services/ai_service.py '{wsl_audio}'; else python3 app/services/ai_service.py '{wsl_audio}'; fi"
-            ]
-            env2 = os.environ.copy()
-            for k in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
-                env2.pop(k, None)
-            proc2 = subprocess.run(cmd_wsl, capture_output=True, env=env2)
-            stdout2 = proc2.stdout.decode("utf-8", errors="ignore")
-            stderr2 = proc2.stderr.decode("utf-8", errors="ignore")
-            print(f"[AI/WSL] returncode={proc2.returncode}")
-            print(f"[AI/WSL] stdout_head={stdout2[:200]}")
-            print(f"[AI/WSL] stderr_head={stderr2[:200]}")
-            if proc2.returncode != 0:
-                return jsonify({"code": 500, "msg": f"AI处理失败(WSL): {stderr2.strip() or stdout2.strip()}"}), 500
-            result = _extract_json_from_output(stdout2)
-            if result is None:
-                return jsonify({"code": 500, "msg": f"AI输出解析失败(WSL): {stdout2[:200]}"}), 500
+        ai_script_rel = "app/services/ai_service.py"
+        print("[AI] invoking via WSL/local...")
+        result = run_in_wsl(ai_script_rel, abs_in)
+        print(f"[AI] segments_count={len(result)}")
 
         sep_root = os.path.join(current_app.root_path, "static", "separated", str(rec.id))
         _ensure_dir(sep_root)
