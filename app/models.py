@@ -19,8 +19,11 @@ class AudioRecord(db.Model):
     duration = db.Column(db.Float, default=0.0)
     # 上传时间
     upload_time = db.Column(db.DateTime, default=datetime.utcnow)
-    # 状态：默认为 'uploaded'
-    status = db.Column(db.String(20), default="uploaded")
+    # 状态：默认为 'pending'
+    status = db.Column(db.String(20), default="pending")
+    # 错误信息
+    error_message = db.Column(db.Text, nullable=True)
+    current_stage = db.Column(db.String(100), default="等待处理")
 
     def __repr__(self):
         return f"<AudioRecord {self.original_filename}>"

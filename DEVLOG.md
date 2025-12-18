@@ -148,3 +148,16 @@
    - 调整 VAD 参数：`max_single_segment_time=60000`、`max_end_silence_chunk=800`，提升停顿容忍度，降低过度切割
    - 新增后处理合并：相邻同说话人且间隔 < 0.3s 的短片段合并；若上一段以 `？/！` 结尾则不合并；合并后再进行标点恢复
    - 文本清洗：正则去重堆叠标点，修复怪异组合，去除行首标点
+
+11. 异步架构与数据管理
+   - 架构升级：`POST /upload` 改为异步非阻塞模式
+     - 主线程：保存文件 → 创建 `pending` 记录 → 启动后台线程 → 立即返回 `{ record_id, status: 'pending' }`
+     - 后台线程：更新状态 `processing` → 执行 AI 识别 → 切割分段 → 更新状态 `success` 或 `failed`（记录 `error_message`）
+     - 实现方式：使用 Python 原生 `threading` 模块，无需额外消息队列组件
+   - 状态管理：
+     - `AudioRecord` 新增 `status` 字段（pending/processing/success/failed）
+     - `AudioRecord` 新增 `error_message` 字段用于记录失败原因
+     - 包含数据库迁移脚本 `migrate_db.py` 以支持旧库升级
+   - 接口增强：
+     - 新增 `DELETE /record/<int:record_id>`：同时删除数据库记录、原始音频文件、分段文件夹
+     - 更新 `GET /record/<int:record_id>`：返回体包含任务状态、错误信息与 `current_stage` 字段，前端可展示细粒度处理阶段（如“正在转码音频格式...”、“AI 模型正在推理 (首次运行需下载模型)...”、“处理完成”等）

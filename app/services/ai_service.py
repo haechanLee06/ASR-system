@@ -102,6 +102,29 @@ class AIServiceRunner:
             return new_path
         return audio_path
 
+    def _normalize_speaker_labels(self, results):
+        """
+        [Fix] 将随机的 speaker ID (如 spk1, spk4) 归一化为标准 spk0, spk1
+        """
+        if not results:
+            return []
+            
+        # 1. 统计所有出现的说话人 ID，按出现顺序排序
+        unique_spks = []
+        for item in results:
+            s = item['speaker']
+            if s not in unique_spks:
+                unique_spks.append(s)
+        
+        # 2. 建立映射表: {'spk1': 'spk0', 'spk4': 'spk1'}
+        spk_map = {old_id: f"spk{i}" for i, old_id in enumerate(unique_spks)}
+        
+        # 3. 替换
+        for item in results:
+            item['speaker'] = spk_map.get(item['speaker'], item['speaker'])
+            
+        return results
+
     def run(self, audio_path):
         if not os.path.exists(audio_path):
             print(json.dumps({"error": f"File not found: {audio_path}"}))
@@ -192,8 +215,12 @@ class AIServiceRunner:
                         except Exception:
                             pass
 
+            # [新增] 归一化标签，确保输出总是 spk0, spk1...
+            merged = self._normalize_speaker_labels(merged)
+
             print(json.dumps(merged, ensure_ascii=False))
             print("[AI] done")
+            return merged
 
         except Exception as e:
             # 打印错误堆栈到 stderr，打印 JSON 错误到 stdout
