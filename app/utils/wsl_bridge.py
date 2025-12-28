@@ -61,6 +61,10 @@ def run_in_wsl(script_rel_path, audio_path):
     if res.returncode != 0:
         logger.error(f"[Exec Fail] Stderr: {res.stderr}")
         raise RuntimeError(f"AI Process Error: {res.stderr[:500]}")
+    else:
+        # Log stderr even on success, as it contains important [3D-Speaker] logs
+        if res.stderr:
+            logger.info(f"[WSL Log] {res.stderr}")
 
     valid_json = None
     for line in reversed(res.stdout.splitlines()):

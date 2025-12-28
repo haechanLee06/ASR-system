@@ -124,10 +124,35 @@ def process_audio_background(app, record_id, temp_path):
                 text = str(item.get("text", ""))
                 start = float(item.get("start", 0.0))
                 end = float(item.get("end", start))
-                out_name = f"{idx+1:04d}.wav"
-                out_abs = os.path.join(sep_root, out_name)
-                app.logger.info(f"[CUT] ffmpeg cut to {out_abs} from {start} to {end}")
-                _run_ffmpeg_cut(abs_in, out_abs, start, end)
+                
+                # [Fix] Do not re-cut. Use the file provided by AI service.
+                source_rel_path = item.get("path")
+                final_rel_path = ""
+                
+                if source_rel_path:
+                    # source_rel_path is relative to project root (e.g. app/static/separated/name/0000.wav)
+                    source_abs = os.path.abspath(source_rel_path)
+                    if os.path.exists(source_abs):
+                        # Copy to the record's separated folder
+                        fname = os.path.basename(source_rel_path)
+                        target_abs = os.path.join(sep_root, fname)
+                        try:
+                            shutil.copy2(source_abs, target_abs)
+                            # final path relative to app root for frontend (static/separated/id/name)
+                            final_rel_path = f"static/separated/{rec.id}/{fname}"
+                        except Exception as e:
+                            app.logger.error(f"[COPY] Failed to copy {source_abs} to {target_abs}: {e}")
+                            final_rel_path = source_rel_path # Fallback
+                    else:
+                        app.logger.warning(f"[COPY] Source file not found: {source_abs}")
+                
+                if not final_rel_path:
+                    # Fallback if no path provided (should not happen with new ai_service)
+                    out_name = f"{idx+1:04d}.wav"
+                    out_abs = os.path.join(sep_root, out_name)
+                    # We strictly avoid ffmpeg cutting as per requirement, but if file is missing, we can't do much.
+                    # Just mark it.
+                    final_rel_path = f"static/separated/{rec.id}/{out_name}"
 
                 seg = DialogueSegment(
                     record_id=rec.id,
@@ -142,7 +167,7 @@ def process_audio_background(app, record_id, temp_path):
                 split = Split(
                     record_id=rec.id,
                     segment_index=idx + 1,
-                    file_path=os.path.join("static", "separated", str(rec.id), out_name).replace("\\", "/"),
+                    file_path=final_rel_path,
                     start_time=start,
                     end_time=end,
                     speaker=speaker,

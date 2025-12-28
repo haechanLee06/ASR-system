@@ -63,32 +63,6 @@ class AIServiceRunner:
         except Exception as e:
             raise RuntimeError(f"Model Init Failed: {str(e)}")
 
-    def cut_audio(self, wav, sr, start, end):
-        # wav shape: [channels, time]
-        if sr != 16000:
-            T = self.torchaudio.transforms
-            resampler = T.Resample(sr, 16000)
-            wav = resampler(wav)
-            sr = 16000
-        
-        # 转单声道
-        if wav.shape[0] > 1:
-            wav = wav.mean(dim=0, keepdim=True)
-        
-        wav = wav.squeeze(0) # [time]
-        
-        total_frames = wav.shape[0]
-        start_frame = int(start * sr)
-        end_frame = int(end * sr)
-        
-        start_frame = max(0, min(start_frame, total_frames))
-        end_frame = max(0, min(end_frame, total_frames))
-        
-        if end_frame <= start_frame:
-            return None
-            
-        return wav[start_frame:end_frame].detach().cpu().numpy()
-
     def _preprocess_audio(self, audio_path):
         wav, sr = self.torchaudio.load(audio_path)
         energy = float(self.np.mean(self.np.abs(wav.numpy()))) if wav.numel() > 0 else 0.0
@@ -138,22 +112,40 @@ class AIServiceRunner:
             base_name = os.path.splitext(os.path.basename(audio_path))[0]
             out_dir = os.path.join(base_dir, "app", "static", "separated", base_name)
             print(f"[AI] diarization out_dir={out_dir}")
+            
+            # [Requirement 2] Use DiarizationService.separate() as sole source
             segs = self.diarizer.separate(audio_path, out_dir)
+            
+            # [Requirement 4] Log enhancement
+            print(f"[3D-Speaker] segments_count = {len(segs)}", file=sys.stderr)
+            
             final_output = []
-            for seg in segs:
+            for i, seg in enumerate(segs):
                 start = float(seg.get("start", 0.0))
                 end = float(seg.get("end", start))
                 spk = str(seg.get("spk", "spk0"))
-                in_path = seg.get("file")
+                rel_path = seg.get("file")
+                
+                # [Requirement 4] Log segment details
+                print(f"[3D-Speaker] seg {i}: spk={spk}, start={start}, end={end}, file={rel_path}", file=sys.stderr)
+                
+                # Resolve absolute path for processing
+                in_path = rel_path
                 if in_path and not os.path.isabs(in_path):
                     if in_path.replace("\\", "/").startswith("static/"):
+                         # Old compatibility
                         in_path = os.path.join(base_dir, "app", in_path)
                     else:
                         in_path = os.path.join(base_dir, in_path)
+                
+                # [Requirement 3] ASR per segment
+                # Preprocess (volume normalization)
                 proc_path = self._preprocess_audio(in_path) if in_path else in_path
+                
                 text_content = ""
-                if self.pipeline_b is not None:
+                if self.pipeline_b is not None and proc_path:
                     try:
+                        # Pass the segment file directly to ASR
                         res_b = self.pipeline_b.generate(input=proc_path)
                         if isinstance(res_b, list) and len(res_b) > 0:
                             text_content = res_b[0].get('text', '')
@@ -166,16 +158,14 @@ class AIServiceRunner:
                                     pass
                     except Exception:
                         text_content = ""
+                
                 cleaned = text_content
                 if cleaned:
                     cleaned = re.sub(r'([。？！，、])\1+', r'\1', cleaned)
                     cleaned = cleaned.replace("，。", "。").replace("？。", "？").replace("！。", "！")
                     cleaned = cleaned.lstrip("。？！，、")
-                rel_path = None
-                try:
-                    rel_path = os.path.relpath(in_path, start=base_dir)
-                except Exception:
-                    rel_path = in_path
+                
+                # Use the relative path provided by diarizer for the final output
                 final_output.append({
                     "speaker": spk,
                     "text": cleaned,
@@ -184,21 +174,8 @@ class AIServiceRunner:
                     "path": rel_path
                 })
 
-            merged = []
-            for item in final_output:
-                if not merged:
-                    merged.append(item)
-                    continue
-                prev = merged[-1]
-                gap = item["start"] - prev["end"]
-                prev_tail = prev["text"].rstrip()[-1:] if prev["text"] else ""
-                tail_stop = prev_tail in ("？", "！")
-                if prev["speaker"] == item["speaker"] and gap < 0.3 and not tail_stop:
-                    prev["text"] = (prev["text"] + " " + item["text"]).strip()
-                    prev["end"] = item["end"]
-                    prev["path"] = item.get("path", prev.get("path"))
-                else:
-                    merged.append(item)
+            # [Requirement] Disable merging to preserve 3D-Speaker segmentation
+            merged = final_output
 
             if getattr(self, "punc_model", None) is not None:
                 for m in merged:
