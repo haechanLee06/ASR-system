@@ -41,12 +41,21 @@ class AIServiceRunner:
             if not os.path.exists(models_dir):
                 raise RuntimeError(f"Models folder not found at {models_dir}")
             path_b = os.path.join(models_dir, "lukeewin01", "paraformer-large-sichuan-offline")
+            path_vad = os.path.join(models_dir, "iic", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
             path_punc = os.path.join(models_dir, "iic", "punc_ct-transformer_zh-cn-common-vocab272727-pytorch")
             print(f"Loading local models from: {models_dir}")
             if self.pipeline_b is None:
-                print("[AI] loading pipeline B...")
+                print("[AI] loading pipeline B (Sichuan Dialect with optimized VAD)...")
+                # [Task 1] Optimize ASR model loading with explicit VAD kwargs
                 self.pipeline_b = self.AutoModel(
                     model=path_b,
+                    vad_model=path_vad,
+                    vad_kwargs={
+                        "max_single_segment_time": 60000,
+                        "threshold": 0.3,
+                        "min_speech_duration_ms": 250,
+                        "speech_pad_ms": 200
+                    },
                     device=self.device,
                     disable_update=True,
                 )

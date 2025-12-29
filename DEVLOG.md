@@ -127,7 +127,7 @@
   ```
 - 本地模型放置：
   - `models/iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch`
-  - `models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch`
+  - `models/iic/speech_fsmn_vad_zh-cn-16k-common-vocab8404-pytorch`
   - `models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch`
   - `models/iic/speech_campplus_sv_zh-cn_16k-common`
   - `models/lukeewin01/paraformer-large-sichuan-offline`
@@ -161,3 +161,9 @@
    - 接口增强：
      - 新增 `DELETE /record/<int:record_id>`：同时删除数据库记录、原始音频文件、分段文件夹
      - 更新 `GET /record/<int:record_id>`：返回体包含任务状态、错误信息与 `current_stage` 字段，前端可展示细粒度处理阶段（如“正在转码音频格式...”、“AI 模型正在推理 (首次运行需下载模型)...”、“处理完成”等）
+
+12. 说话人分割与模型参数优化
+   - 说话人分割升级：彻底切换为 3D-Speaker 原生 `infer_diarization` 接口，不再依赖 ModelScope pipeline，解决单说话人问题。
+   - ASR 识别优化：针对四川话方言调整 VAD 参数（阈值 0.3，最大切分 60s，保留 200ms 上下文），提升微弱语气词识别率。
+   - 接口完善：`GET /record/<id>` 返回 `audio_url` 字段（Web 相对路径），修复前端播放索引错位问题。
+   - 日志增强：增加 WSL 桥接日志回显，支持在 Windows 控制台查看 AI 引擎的 stderr 输出。
