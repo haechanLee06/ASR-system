@@ -370,8 +370,13 @@ def record_detail(record_id):
         segs = DialogueSegment.query.filter_by(record_id=record_id).order_by(DialogueSegment.start_time.asc()).all()
         payload = []
         for idx, s in enumerate(segs):
-            out_name = f"{idx+1:04d}.wav"
+            # [Fix] Files are 0-indexed (0000.wav), so use idx directly
+            out_name = f"{idx:04d}.wav"
             path = os.path.join("static", "separated", str(record_id), out_name).replace("\\", "/")
+            
+            # [Requirement] Add audio_url with leading slash
+            audio_url = f"/{path}"
+            
             payload.append({
                 "id": s.id,
                 "spk": s.speaker,
@@ -379,6 +384,7 @@ def record_detail(record_id):
                 "start": s.start_time,
                 "end": s.end_time,
                 "path": path,
+                "audio_url": audio_url,
             })
         
         # Updated response structure
