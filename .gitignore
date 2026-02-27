@@ -23,3 +23,7 @@ outputs/
 .vscode/
 .idea/
 
+
+# External ASR Frameworks
+FunASR/
+3D-Speaker/
