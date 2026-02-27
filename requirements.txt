@@ -8,4 +8,8 @@ torch
 torchaudio
 funasr
 modelscope
-
+addict
+torchcodec
+# datasets==2.21.0
+# simplejson
+# sortedcontainers
