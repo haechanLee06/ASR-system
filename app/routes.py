@@ -11,6 +11,8 @@ from sqlalchemy import inspect
 from . import db
 from .models import AudioRecord, DialogueSegment, Split
 from .services.audio_handler import save_upload_file, convert_to_16k_wav
+from .services.ai_service import AIServiceRunner
+from .services.llm_service import request_local_llm, format_transcript
 from .utils.wsl_bridge import run_in_wsl
 
 main = Blueprint("main", __name__)
@@ -353,6 +355,73 @@ def history():
     except Exception as e:
         return jsonify({"code": 500, "msg": str(e)})
 
+@main.route("/api/transcript_data/<int:record_id>", methods=["GET"])
+@jwt_required()
+def get_transcript_data(record_id):
+    """
+    专门服务于 LLM 预处理和前端核查页的标准化数据接口
+    """
+    try:
+        # 1. 权限与存在性校验
+        inspector = inspect(db.engine)
+        cols = [c['name'] for c in inspector.get_columns('audio_record')]
+        rec = AudioRecord.query.get(record_id)
+        
+        if not rec:
+            return jsonify({"success": False, "msg": "记录不存在"}), 404
+            
+        if 'user_id' in cols:
+            uid = int(get_jwt_identity())
+            if rec.user_id is not None and rec.user_id != uid:
+                return jsonify({"success": False, "msg": "无权访问该记录"}), 403
+                
+        # 2. 获取原始 segments
+        segments = DialogueSegment.query.filter_by(record_id=record_id).order_by(DialogueSegment.start_time).all()
+        
+        # 3. 数据清洗与增强
+        display_data = []
+        llm_context_lines = []
+        
+        # 映射规则：spk0 -> A, spk1 -> B
+        role_map = {
+            "spk0": {"role": "A", "side": "left"},
+            "spk1": {"role": "B", "side": "right"}
+        }
+        
+        for idx, seg in enumerate(segments, 1):
+            # 获取映射信息，默认 fallback 到 Unknown/left
+            spk_info = role_map.get(seg.speaker, {"role": "Unknown", "side": "left"})
+            
+            # 构建前端展示数据
+            item = {
+                "seq_id": idx,
+                "role": spk_info["role"],
+                "side": spk_info["side"],
+                "text": seg.content if seg.content else "",
+                "start_time": seg.start_time,
+                "end_time": seg.end_time,
+                "speaker": seg.speaker # 保留原始标签备查
+            }
+            display_data.append(item)
+            
+            # 构建 LLM 上下文行
+            # 格式：[seq_id] 角色{role}: {text}
+            line = f"[{idx}] 角色{spk_info['role']}: {item['text']}"
+            llm_context_lines.append(line)
+            
+        # 4. 返回结果
+        return jsonify({
+            "success": True,
+            "data": {
+                "display_data": display_data,
+                "llm_context": "\n".join(llm_context_lines)
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+
 @main.route("/record/<int:record_id>", methods=["GET"])
 @jwt_required()
 def record_detail(record_id):
@@ -402,3 +471,99 @@ def record_detail(record_id):
         return jsonify({"code": 200, "data": data})
     except Exception as e:
         return jsonify({"code": 500, "msg": str(e)})
+
+@main.route("/record/<int:record_id>/segment/<int:segment_index>", methods=["PUT"])
+@jwt_required()
+def update_segment(record_id, segment_index):
+    req_json = request.get_json()
+    if not req_json or 'text' not in req_json:
+        return jsonify({"code": 400, "message": "Missing 'text' field"}), 400
+        
+    new_text = req_json['text']
+    
+    try:
+        inspector = inspect(db.engine)
+        cols = [c['name'] for c in inspector.get_columns('audio_record')]
+        rec = AudioRecord.query.get(record_id)
+        if not rec:
+            return jsonify({"code": 404, "message": "记录不存在"}), 404
+            
+        if 'user_id' in cols:
+            uid = int(get_jwt_identity())
+            if rec.user_id is not None and rec.user_id != uid:
+                return jsonify({"code": 403, "message": "无权访问该记录"}), 403
+                
+        # 按照 start_time 升序获取 segments
+        segments = DialogueSegment.query.filter_by(record_id=record_id).order_by(DialogueSegment.start_time.asc()).all()
+        
+        # 越界检查
+        if segment_index < 0 or segment_index >= len(segments):
+            return jsonify({"code": 404, "message": "片段索引越界"}), 404
+            
+        target_segment = segments[segment_index]
+        target_segment.content = new_text
+        db.session.commit()
+        
+        return jsonify({
+            "code": 200, 
+            "message": "Segment updated successfully", 
+            "data": {
+                "index": segment_index, 
+                "new_text": new_text
+            }
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": 500, "message": str(e)}), 500
+
+@main.route("/api/summary/<int:record_id>", methods=["POST"])
+@jwt_required()
+def generate_summary(record_id):
+    try:
+        inspector = inspect(db.engine)
+        cols = [c['name'] for c in inspector.get_columns('audio_record')]
+        rec = AudioRecord.query.get(record_id)
+        if not rec:
+            return jsonify({"code": 404, "message": "记录不存在"}), 404
+            
+        if 'user_id' in cols:
+            uid = int(get_jwt_identity())
+            if rec.user_id is not None and rec.user_id != uid:
+                return jsonify({"code": 403, "message": "无权访问该记录"}), 403
+
+        # 检查是否已有缓存的摘要
+        if getattr(rec, 'llm_summary', None):
+            try:
+                cached_obj = json.loads(rec.llm_summary)
+                return jsonify({"code": 200, "data": {"summary": cached_obj}})
+            except Exception:
+                pass # 如果解析失败则回退到重新生成
+                
+        # 获取按照时间排序的分段
+        segs = DialogueSegment.query.filter_by(record_id=record_id).order_by(DialogueSegment.start_time.asc()).all()
+        if not segs:
+            return jsonify({"code": 400, "message": "当前记录无对话片段"}), 400
+            
+        # 组装格式化所需的结构
+        dict_segs = [{"speaker": s.speaker, "text": s.content} for s in segs]
+        
+        transcript_data = format_transcript(dict_segs)
+        full_text = transcript_data.get("full_transcript", "")
+        
+        if not full_text:
+            return jsonify({"code": 400, "message": "提取的对话文本为空"}), 400
+            
+        # 请求本地微调大模型
+        summary_dict = request_local_llm(full_text)
+        
+        # 保存 AI 给出的 JSON 报告结构
+        rec.llm_summary = json.dumps(summary_dict, ensure_ascii=False)
+        db.session.commit()
+        
+        return jsonify({"code": 200, "data": {"summary": summary_dict}})
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": 500, "message": str(e)}), 500
+

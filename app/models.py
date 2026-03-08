@@ -24,6 +24,8 @@ class AudioRecord(db.Model):
     # 错误信息
     error_message = db.Column(db.Text, nullable=True)
     current_stage = db.Column(db.String(100), default="等待处理")
+    # 用于持久化存储 AI（LLM）生成的报告
+    llm_summary = db.Column(db.Text, nullable=True)
 
     def __repr__(self):
         return f"<AudioRecord {self.original_filename}>"

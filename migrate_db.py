@@ -22,7 +22,7 @@ def migrate():
     conn = sqlite3.connect(target_db)
     cursor = conn.cursor()
     
-    # Check if error_message column exists
+    # Check if columns exist
     cursor.execute("PRAGMA table_info(audio_record)")
     columns = [row[1] for row in cursor.fetchall()]
     
@@ -39,6 +39,14 @@ def migrate():
         conn.commit()
     else:
         print("current_stage column already exists.")
+        
+    # --- 下面是我们刚刚新增的 AI 总结字段迁移逻辑 ---
+    if "llm_summary" not in columns:
+        print("Adding llm_summary column...")
+        cursor.execute("ALTER TABLE audio_record ADD COLUMN llm_summary TEXT")
+        conn.commit()
+    else:
+        print("llm_summary column already exists.")
         
     conn.close()
     print("Migration complete.")

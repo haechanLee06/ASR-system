@@ -213,6 +213,8 @@ class AIServiceRunner:
             traceback.print_exc(file=sys.stderr)
             print(json.dumps({"error": str(e)}))
 
+            print(json.dumps({"error": str(e)}))
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(json.dumps({"error": "Usage: python ai_service.py <audio_path>"}))

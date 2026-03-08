@@ -167,3 +167,31 @@
    - ASR 识别优化：针对四川话方言调整 VAD 参数（阈值 0.3，最大切分 60s，保留 200ms 上下文），提升微弱语气词识别率。
    - 接口完善：`GET /record/<id>` 返回 `audio_url` 字段（Web 相对路径），修复前端播放索引错位问题。
    - 日志增强：增加 WSL 桥接日志回显，支持在 Windows 控制台查看 AI 引擎的 stderr 输出。
+
+13. 对话文本整合功能
+   - 在 `AIServiceRunner` 中新增 `format_transcript(segments)` 方法
+   - 支持将切片列表转换为三种视角的文本：
+     - `full_transcript`: 按时间顺序拼接的完整对话（格式："spkX: 内容\n"）
+     - `spk0_transcript`: 仅 spk0 的内容（纯文本）
+     - `spk1_transcript`: 仅 spk1 的内容（纯文本）
+   - 该方法作为独立功能模块，为接入 LLM 摘要/问答或前端纯文本展示做准备，不影响现有识别与切片流程。
+
+14. 核查页与 LLM 数据标准化
+   - 新增 API `GET /api/transcript_data/<file_id>`
+   - 数据清洗与增强：
+     - `seq_id`: 添加对话轮次序号
+     - `role`: 强制映射 spk0->Role A, spk1->Role B
+     - `side`: 根据角色分配 left/right 布局属性
+   - 生成标准化 LLM 上下文：`[seq_id] 角色{role}: {text}`
+
+15. 用户自纠功能接口
+   - 新增 `PUT /record/<int:record_id>/segment/<int:segment_index>`，需要认证
+   - 只更新 `DialogueSegment` 内的 `content` 字段。
+   - 利用 `start_time` 升序获取正确索引，不触发音频重新切割。
+
+16. 接入本地 Ollama 大模型进行对话总结
+   - 新增 `POST /api/summary/<int:record_id>`，需要 `jwt` 认证，校验记录归属。
+   - 请求本地的 `qwen-sichuan-psych` 模型进行结构化的总结分析。
+   - 将模型按规定 Prompt 返回的分析 JSON 进行验证并持久化存储在 `AudioRecord.llm_summary` 字段供后续快速查询。
+
+
