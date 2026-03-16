@@ -194,4 +194,14 @@
    - 请求本地的 `qwen-sichuan-psych` 模型进行结构化的总结分析。
    - 将模型按规定 Prompt 返回的分析 JSON 进行验证并持久化存储在 `AudioRecord.llm_summary` 字段供后续快速查询。
 
+17. Dashboard 大盘状态接口
+   - 新增 `GET /api/dashboard/ambient`：返回地理位置、天气、气温（通过高德地图免费天气 API）、以及服务持续运行时间（天数/小时）。
+   - 新增 `GET /api/dashboard/health`：实时探测 Ollama（GET 127.0.0.1:11434）和 Paraformer 模型目录存在性，返回 `llm_online` 和 `asr_online` 标志供前端展示。
+   - 服务启动时间记录在 `app.config['SERVER_START_TIME']`（`create_app` 内写入）。
+   - 天气 API Key 改为免费方案：`ip-api.com`（IP 定位）+ `Open-Meteo`（天气），无需注册和密钥。
 
+18. Dashboard 业务速览接口（多租户数据隔离重构）
+   - 接口路径：`GET /api/dashboard/stats`，新增 `@jwt_required()` 强制鉴权。
+   - `total_transcribed`：严格统计**当前用户**下状态为 `success` 的记录总数。
+   - `total_summarized`：严格统计**当前用户**下已完成 `llm_summary` 的记录总数。
+   - `uptime_hours`（累计护航时长）：改为统计**当前用户**所有处理成功记录的 `duration` 总和（单位：小时），实现业务层面的数据完全私有化。

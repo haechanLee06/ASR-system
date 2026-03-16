@@ -33,5 +33,8 @@ def create_app():
         except Exception:
             pass
 
-    return app
+    # 记录服务启动时间，供 /api/dashboard/ambient 计算持续运行时间
+    from datetime import datetime as _dt
+    app.config['SERVER_START_TIME'] = _dt.utcnow()
 
+    return app
