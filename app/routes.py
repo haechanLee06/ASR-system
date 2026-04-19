@@ -781,20 +781,25 @@ def dashboard_keywords():
 
     # 尝试使用 jieba 提取关键词
     word_counts = {}
-    try:
-        import jieba.analyse
-        # 提取 top 20 关键词
-        tags = jieba.analyse.extract_tags(text_corpus, topK=20, withWeight=True)
-        # 将归一化的权重放大，适配前端 ECharts 等大数字直观显示
-        for tag, weight in tags:
-            word_counts[tag] = int(weight * 100)
-    except ImportError:
-        # Fallback: 无 Jieba 时，直接通过简单的词频作为降级方案 (模拟部分高频词)
-        fallback_words = ["服务", "开空调", "态度", "五块钱", "投诉"]
-        import random
-        for i, w in enumerate(fallback_words):
-            if w in text_corpus or i < 3:
-                word_counts[w] = random.randint(15, 45)
+    if text_corpus.strip():
+        try:
+            import jieba.analyse
+            # 提取 top 20 关键词，并将权重放大适配前端 ECharts
+            tags = jieba.analyse.extract_tags(text_corpus, topK=20, withWeight=True)
+            for tag, weight in tags:
+                word_counts[tag] = int(weight * 100)
+        except ImportError:
+            # Fallback：无 jieba 时，用正则对中文字符做词频统计
+            import re
+            from collections import Counter
+            # 提取长度 >= 2 的连续中文词片段
+            words = re.findall(r'[\u4e00-\u9fa5]{2,6}', text_corpus)
+            # 简单停用词过滤
+            stop = {"的", "了", "是", "在", "我", "你", "他", "她", "我们", "就是", "这个", "那个",
+                    "一个", "没有", "可以", "这样", "那么", "因为", "所以"}
+            counter = Counter(w for w in words if w not in stop)
+            for word, cnt in counter.most_common(20):
+                word_counts[word] = cnt
 
     data = [{"name": k, "value": v} for k, v in word_counts.items() if v > 0]
     

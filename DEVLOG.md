@@ -205,3 +205,7 @@
    - `total_transcribed`：严格统计**当前用户**下状态为 `success` 的记录总数。
    - `total_summarized`：严格统计**当前用户**下已完成 `llm_summary` 的记录总数。
    - `uptime_hours`（累计护航时长）：改为统计**当前用户**所有处理成功记录的 `duration` 总和（单位：小时），实现业务层面的数据完全私有化。
+
+19. Dashboard 词云与最近记录接口（多租户数据隔离）
+   - 新增 `GET /api/dashboard/keywords`：读取当前用户含有 LLM 总结的文本数据，利用 `jieba.analyse` 动态提取高频关键词及权重，支持无第三方依赖时的硬编码降级展示。
+   - 新增 `GET /api/dashboard/recent_records`：按时间倒序获取当前用户的最近 5 条转录任务，返回含有“相对时间计算（如 10 分钟前）”以及“状态映射（如 分析完成）”的标准化格式列表。
