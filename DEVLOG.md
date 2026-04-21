@@ -185,27 +185,49 @@
    - 生成标准化 LLM 上下文：`[seq_id] 角色{role}: {text}`
 
 15. 用户自纠功能接口
-   - 新增 `PUT /record/<int:record_id>/segment/<int:segment_index>`，需要认证
-   - 只更新 `DialogueSegment` 内的 `content` 字段。
-   - 利用 `start_time` 升序获取正确索引，不触发音频重新切割。
+    - 新增 `PUT /record/<int:record_id>/segment/<int:segment_index>`，需要认证
+    - 只更新 `DialogueSegment` 内的 `content` 字段。
+    - 利用 `start_time` 升序获取正确索引，不触发音频重新切割。
 
 16. 接入本地 Ollama 大模型进行对话总结
-   - 新增 `POST /api/summary/<int:record_id>`，需要 `jwt` 认证，校验记录归属。
-   - 请求本地的 `qwen-sichuan-psych` 模型进行结构化的总结分析。
-   - 将模型按规定 Prompt 返回的分析 JSON 进行验证并持久化存储在 `AudioRecord.llm_summary` 字段供后续快速查询。
+    - 新增 `POST /api/summary/<int:record_id>`，需要 `jwt` 认证，校验记录归属。
+    - 请求本地的 `qwen-sichuan-psych` 模型进行结构化的总结分析。
+    - 将模型按规定 Prompt 返回的分析 JSON 进行验证并持久化存储在 `AudioRecord.llm_summary` 字段供后续快速查询。
 
 17. Dashboard 大盘状态接口
-   - 新增 `GET /api/dashboard/ambient`：返回地理位置、天气、气温（通过高德地图免费天气 API）、以及服务持续运行时间（天数/小时）。
-   - 新增 `GET /api/dashboard/health`：实时探测 Ollama（GET 127.0.0.1:11434）和 Paraformer 模型目录存在性，返回 `llm_online` 和 `asr_online` 标志供前端展示。
-   - 服务启动时间记录在 `app.config['SERVER_START_TIME']`（`create_app` 内写入）。
-   - 天气 API Key 改为免费方案：`ip-api.com`（IP 定位）+ `Open-Meteo`（天气），无需注册和密钥。
+    - 新增 `GET /api/dashboard/ambient`：返回地理位置、天气、气温（通过高德地图免费天气 API）、以及服务持续运行时间（天数/小时）。
+    - 新增 `GET /api/dashboard/health`：实时探测 Ollama（GET 127.0.0.1:11434）和 Paraformer 模型目录存在性，返回 `llm_online` 和 `asr_online`标志供前端展示。
+    - 服务启动时间记录在 `app.config['SERVER_START_TIME']`（`create_app` 内写入）。
+    - 天气 API Key 改为免费方案：`ip-api.com`（IP 定位）+ `Open-Meteo`（天气），无需注册和密钥。
 
 18. Dashboard 业务速览接口（多租户数据隔离重构）
-   - 接口路径：`GET /api/dashboard/stats`，新增 `@jwt_required()` 强制鉴权。
-   - `total_transcribed`：严格统计**当前用户**下状态为 `success` 的记录总数。
-   - `total_summarized`：严格统计**当前用户**下已完成 `llm_summary` 的记录总数。
-   - `uptime_hours`（累计护航时长）：改为统计**当前用户**所有处理成功记录的 `duration` 总和（单位：小时），实现业务层面的数据完全私有化。
+    - 接口路径：`GET /api/dashboard/stats`，新增 `@jwt_required()` 强制鉴权。
+    - `total_transcribed`：严格统计**当前用户**下状态为 `success` 的记录总数。
+    - `total_summarized`：严格统计**当前用户**下已完成 `llm_summary` 的记录总数。
+    - `uptime_hours`（累计护航时长）：改为统计**当前用户**所有处理成功记录的 `duration` 总和（单位：小时），实现业务层面的数据完全私有化。
 
 19. Dashboard 词云与最近记录接口（多租户数据隔离）
-   - 新增 `GET /api/dashboard/keywords`：读取当前用户含有 LLM 总结的文本数据，利用 `jieba.analyse` 动态提取高频关键词及权重，支持无第三方依赖时的硬编码降级展示。
-   - 新增 `GET /api/dashboard/recent_records`：按时间倒序获取当前用户的最近 5 条转录任务，返回含有“相对时间计算（如 10 分钟前）”以及“状态映射（如 分析完成）”的标准化格式列表。
+    - 新增 `GET /api/dashboard/keywords`：读取当前用户含有 LLM 总结的文本数据，利用 `jieba.analyse` 动态提取高频关键词及权重，支持无第三方依赖时的硬编码降级展示。
+    - 新增 `GET /api/dashboard/recent_records`：按时间倒序获取当前用户的最近 5 条转录任务，返回含有“相对时间计算（如 10 分钟前）”以及“状态映射（如 分析完成）”的标准化格式列表。
+
+20. 运行时间累计化改造（心跳会话机制）
+    - 运行时间定义修正：将“运行时间”定义为“用户登录后的累计在线时长”。
+    - 心跳机制实现：
+        - 前端在 `Layout.vue` 中设置 30s 定时器，向后端发送 `/api/system/heartbeat` 请求。
+        - 后端新增 `SystemSession` 模型，记录会话的 `start_time` 和 `end_time`。
+        - 每次心跳请求时，若当前会话未超时（60s内），则更新 `end_time`；否则开启新会话。
+        - 解决了无法准确判定“用户何时离开”的问题。
+    - 指标统计重构：
+        - Dashboard 的时间看板现在通过对 `SystemSession` 表进行时间差累加计算。
+        - 支持全系统视角（`ambient`）与个人视角（`stats`）的累计时长统计。
+
+21. 手动切割与二次转录性能优化 (隔离加载与批量处理)
+    - **模型隔离加载 (`--asr_only`)**：针对手动切割再转录的场景，在 `ai_service.py` 增加隔离模式。该模式下彻底不加载重量级的 3D-Speaker (Diarization) 模型，仅初始化 FunASR (Paraformer)，显著降低显存压力。
+    - **跨平台路径动态解算**：重构了 `wsl_bridge.py`，废弃硬编码路径。现在通过 `__file__` 自动嗅探宿主机物理位置并映射为 WSL `/mnt/` 挂载路径，解决了“No such file or directory”报错，增强了项目移植性。
+    - **WSL 执行环境稳定性增强**：针对非交互式 Shell 的环境注入问题，将调用方式从 `source activate` 改为直接指向物理路径 `./.venv/bin/python`，解决了 `python: command not found` 导致的推理崩溃。
+    - **角色切换 API**：新增 `PUT /record/.../segment/.../speaker` 接口，支持用户手动校正说话人标识，同步维护 `DialogueSegment` 与 `Split` 表的数据一致性。
+    - **对话切分二次转录 API**：
+        - 新增 `POST /record/.../segment/.../split` 接口，集成 `ffmpeg` 物理切割逻辑。
+        - **单次加载批量推理**：重构了后端调度机制，支持在一次模型初始化中顺序处理多个音频碎片。该优化将手动分段的等待时间缩短了 50%（从 40s+ 降低至 20s 左右），彻底解决了前端请求超时（Timeout）问题。
+        - **数据链重构**：实现旧片段销毁、新 UUID 片段持久化、以及后续全局索引自动偏移（`segment_index` 自增）逻辑，保证了对话时序的绝对严谨。
+    - **静态资源映射修复**：更新了 `record_detail` 路由逻辑，由“基于索引猜测文件名”改为“基于 Split 表读取真实物理路径”，解决了手动切割后前端播放器无法定位 UUID 命名音频的问题。

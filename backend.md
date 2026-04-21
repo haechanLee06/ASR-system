@@ -102,7 +102,7 @@ my_voice_project/
 | `WSL_DISTRO` | `str` | `Ubuntu-20.04` | WSL 发行版名称 |
 | `AMAP_KEY` | `str` | `""` | 高德地图API Key（当前已切换为免费方案，此项已弃用） |
 | `JWT_SECRET_KEY` | `str` | `dev-secret-change-me` | JWT 签名密钥（在 `create_app` 中 `setdefault` 写入） |
-| `SERVER_START_TIME` | `datetime` | 服务启动时刻 | 记录服务启动时间，供 `/api/dashboard/ambient` 计算 uptime |
+| `SERVER_START_TIME` | `datetime` | 服务启动时刻 | （旧逻辑预留）当前 `/api/dashboard/ambient` 已改用数据库累计时长作为运行时间 |
 
 ---
 
@@ -206,6 +206,9 @@ AudioRecord (1) ────────────── (0..N) DialogueSegmen
 
 AudioRecord (1) ────────────── (0..N) Split
                   record_id (FK, NOT NULL)
+
+User (1) ───────────────────── (0..N) SystemSession
+                  user_id (FK, NOT NULL)
 ```
 
 > **关键设计决策**：
@@ -528,7 +531,7 @@ AudioRecord (1) ────────────── (0..N) Split
 
 ---
 
-#### `GET /api/dashboard/ambient` — 环境时钟与天气
+#### `GET /api/dashboard/ambient` — 环境时钟与状态（系统累计护航量）
 
 | 属性 | 值 |
 |------|----|
@@ -553,6 +556,8 @@ AudioRecord (1) ────────────── (0..N) Split
 }
 ```
 
+> **注**：`uptime_days/hours` 在此接口中表示**全系统的有效在位时长**（基于 `SystemSession` 心跳记录累计）。
+
 ---
 
 #### `GET /api/dashboard/stats` — 当前用户业务速览
@@ -570,14 +575,14 @@ SELECT COUNT(*) FROM audio_record WHERE user_id = ? AND status = 'success';
 -- total_summarized  
 SELECT COUNT(*) FROM audio_record WHERE user_id = ? AND llm_summary IS NOT NULL AND llm_summary != '';
 
--- uptime_hours (护航时长)
-SELECT SUM(duration) FROM audio_record WHERE user_id = ? AND status = 'success';
--- 结果 / 3600 取整
+-- uptime_days/hours (个人累计在线时长)
+SELECT SUM(julianday(end_time) - julianday(start_time)) * 86400 FROM system_session WHERE user_id = ?;
+-- 将总秒数换算为 D天 H小时
 ```
 
 **响应体**：
 ```json
-{"code": 200, "data": {"total_transcribed": 15, "total_summarized": 8, "uptime_hours": 3}}
+{"code": 200, "data": {"total_transcribed": 15, "total_summarized": 8, "uptime_days": 0, "uptime_hours": 3}}
 ```
 
 ---

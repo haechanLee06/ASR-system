@@ -18,7 +18,7 @@ def _get_wsl_path():
             return path
     return "wsl"
 
-def run_in_wsl(script_rel_path, audio_path):
+def run_in_wsl(script_rel_path, audio_path, *extra_args):
     current_os = platform.system()
 
     if current_os == "Linux":
@@ -26,7 +26,7 @@ def run_in_wsl(script_rel_path, audio_path):
         python_exe = sys.executable
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         script_abs_path = os.path.join(project_root, script_rel_path)
-        cmd = [python_exe, script_abs_path, audio_path]
+        cmd = [python_exe, script_abs_path, audio_path] + list(extra_args)
         logger.info(f"[Local] Executing: {cmd}")
         try:
             res = subprocess.run(
@@ -41,11 +41,14 @@ def run_in_wsl(script_rel_path, audio_path):
     else:
         logger.info("[Bridge] Detected Windows environment. Bridging to WSL.")
         wsl_exe = _get_wsl_path()
-        wsl_project_root = "/mnt/c/Users/asus/Desktop/毕业论文/ASR-system/my_voice_project"
+        project_root_win = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        drive_root, tail_root = os.path.splitdrive(project_root_win)
+        wsl_project_root = "/mnt/" + drive_root.lower().rstrip(':') + tail_root.replace('\\', '/')
         abs_audio = os.path.abspath(audio_path)
         drive, tail = os.path.splitdrive(abs_audio)
         wsl_audio_path = "/mnt/" + drive.lower().rstrip(':') + tail.replace('\\', '/')
-        bash_cmd = f"export LC_ALL=C.UTF-8 && cd '{wsl_project_root}' && source .venv/bin/activate && python {script_rel_path} '{wsl_audio_path}'"
+        extra_args_str = " ".join(extra_args)
+        bash_cmd = f"export LC_ALL=C.UTF-8 && cd '{wsl_project_root}' && ./.venv/bin/python {script_rel_path} '{wsl_audio_path}' {extra_args_str}"
         cmd = [wsl_exe, "bash", "-lc", bash_cmd]
         try:
             res = subprocess.run(

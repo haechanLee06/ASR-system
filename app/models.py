@@ -48,3 +48,14 @@ class Split(db.Model):
     end_time = db.Column(db.Float, nullable=False)
     speaker = db.Column(db.String(50))
 
+class SystemSession(db.Model):
+    # 系统运行/会话计时表
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    # 会话开始时间
+    start_time = db.Column(db.DateTime, default=datetime.utcnow)
+    # 会话最后活跃时间（通过心跳更新，以此作为结束时间的估值）
+    end_time = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<SystemSession {self.user_id} {self.start_time} to {self.end_time}>"

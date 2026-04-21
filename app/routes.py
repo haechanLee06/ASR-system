@@ -9,7 +9,7 @@ from flask import Blueprint, render_template, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import inspect, func
 from . import db
-from .models import AudioRecord, DialogueSegment, Split
+from .models import AudioRecord, DialogueSegment, Split, SystemSession
 from .services.audio_handler import save_upload_file, convert_to_16k_wav
 from .services.ai_service import AIServiceRunner
 from .services.llm_service import request_local_llm, format_transcript
@@ -437,14 +437,16 @@ def record_detail(record_id):
                 return jsonify({"code": 403, "msg": "无权访问该记录"}), 403
         
         segs = DialogueSegment.query.filter_by(record_id=record_id).order_by(DialogueSegment.start_time.asc()).all()
+        splits = Split.query.filter_by(record_id=record_id).order_by(Split.start_time.asc()).all()
         payload = []
         for idx, s in enumerate(segs):
-            # [Fix] Files are 0-indexed (0000.wav), so use idx directly
-            out_name = f"{idx:04d}.wav"
-            path = os.path.join("static", "separated", str(record_id), out_name).replace("\\", "/")
+            if idx < len(splits) and splits[idx].file_path:
+                path = splits[idx].file_path.replace("\\", "/")
+            else:
+                out_name = f"{idx:04d}.wav"
+                path = os.path.join("static", "separated", str(record_id), out_name).replace("\\", "/")
             
-            # [Requirement] Add audio_url with leading slash
-            audio_url = f"/{path}"
+            audio_url = f"/{path}" if not path.startswith("/") else path
             
             payload.append({
                 "id": s.id,
@@ -517,6 +519,158 @@ def update_segment(record_id, segment_index):
         db.session.rollback()
         return jsonify({"code": 500, "message": str(e)}), 500
 
+@main.route("/record/<int:record_id>/segment/<int:segment_index>/speaker", methods=["PUT"])
+@jwt_required()
+def update_segment_speaker(record_id, segment_index):
+    req_json = request.get_json()
+    if not req_json or 'speaker' not in req_json:
+        return jsonify({"code": 400, "message": "Missing 'speaker' field"}), 400
+        
+    new_speaker = req_json['speaker']
+    
+    try:
+        inspector = inspect(db.engine)
+        cols = [c['name'] for c in inspector.get_columns('audio_record')]
+        rec = AudioRecord.query.get(record_id)
+        if not rec:
+            return jsonify({"code": 404, "message": "记录不存在"}), 404
+            
+        if 'user_id' in cols:
+            uid = int(get_jwt_identity())
+            if rec.user_id is not None and rec.user_id != uid:
+                return jsonify({"code": 403, "message": "无权访问该记录"}), 403
+                
+        segments = DialogueSegment.query.filter_by(record_id=record_id).order_by(DialogueSegment.start_time.asc()).all()
+        if segment_index < 0 or segment_index >= len(segments):
+            return jsonify({"code": 404, "message": "片段索引越界"}), 404
+            
+        target_segment = segments[segment_index]
+        target_segment.speaker = new_speaker
+        
+        splits = Split.query.filter_by(record_id=record_id).order_by(Split.segment_index.asc()).all()
+        if 0 <= segment_index < len(splits):
+            splits[segment_index].speaker = new_speaker
+            
+        db.session.commit()
+        
+        return jsonify({
+            "code": 200, 
+            "message": "Speaker updated successfully", 
+            "data": {
+                "index": segment_index, 
+                "speaker": new_speaker
+            }
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": 500, "message": str(e)}), 500
+
+@main.route("/record/<int:record_id>/segment/<int:segment_index>/split", methods=["POST"])
+@jwt_required()
+def split_segment(record_id, segment_index):
+    req_json = request.get_json()
+    if not req_json or 'split_offset' not in req_json:
+        return jsonify({"code": 400, "message": "Missing 'split_offset' field"}), 400
+        
+    split_offset = float(req_json['split_offset'])
+    
+    try:
+        inspector = inspect(db.engine)
+        cols = [c['name'] for c in inspector.get_columns('audio_record')]
+        rec = AudioRecord.query.get(record_id)
+        if not rec:
+            return jsonify({"code": 404, "message": "记录不存在"}), 404
+            
+        if 'user_id' in cols:
+            uid = int(get_jwt_identity())
+            if rec.user_id is not None and rec.user_id != uid:
+                return jsonify({"code": 403, "message": "无权访问该记录"}), 403
+                
+        segments = DialogueSegment.query.filter_by(record_id=record_id).order_by(DialogueSegment.start_time.asc()).all()
+        if segment_index < 0 or segment_index >= len(segments):
+            return jsonify({"code": 404, "message": "片段索引越界"}), 404
+            
+        target_seg = segments[segment_index]
+        splits = Split.query.filter_by(record_id=record_id).order_by(Split.segment_index.asc()).all()
+        target_split = splits[segment_index]
+        
+        original_start = target_seg.start_time
+        original_end = target_seg.end_time
+        split_point = original_start + split_offset
+        
+        if split_point <= original_start or split_point >= original_end:
+            return jsonify({"code": 400, "message": "分割点超出当前片段范围"}), 400
+            
+        speaker = target_seg.speaker
+        
+        old_file_path = os.path.join(current_app.root_path, target_split.file_path)
+        sep_root = os.path.join(current_app.root_path, "static", "separated", str(rec.id))
+        
+        import uuid
+        part1_name = f"{uuid.uuid4().hex[:8]}.wav"
+        part2_name = f"{uuid.uuid4().hex[:8]}.wav"
+        part1_abs = os.path.join(sep_root, part1_name)
+        part2_abs = os.path.join(sep_root, part2_name)
+        
+        duration = original_end - original_start
+        _run_ffmpeg_cut(old_file_path, part1_abs, 0, split_offset)
+        _run_ffmpeg_cut(old_file_path, part2_abs, split_offset, duration)
+        
+        part1_text = ""
+        part2_text = ""
+        ai_script_rel = "app/services/ai_service.py"
+        
+        # Translate part2_abs to WSL path format to pass as an extra arg
+        drive2, tail2 = os.path.splitdrive(part2_abs)
+        wsl_part2_abs = f"/mnt/{drive2.lower().rstrip(':')}{tail2.replace(os.sep, '/')}"
+        
+        try:
+            # Batch process both parts in a single WSL call to cut total execution time by 50%
+            batch_res = run_in_wsl(ai_script_rel, part1_abs, wsl_part2_abs, "--asr_only")
+            if batch_res and len(batch_res) >= 2:
+                part1_text = batch_res[0].get("text", "")
+                part2_text = batch_res[1].get("text", "")
+            elif batch_res and len(batch_res) == 1:
+                # Fallback if somehow only 1 processed
+                part1_text = batch_res[0].get("text", "")
+        except Exception as e:
+            current_app.logger.error(f"Batch retranscribe failed: {e}")
+            
+        db.session.delete(target_seg)
+        db.session.delete(target_split)
+        
+        new_seg1 = DialogueSegment(
+            record_id=rec.id, start_time=original_start, end_time=split_point, speaker=speaker, content=part1_text
+        )
+        new_seg2 = DialogueSegment(
+            record_id=rec.id, start_time=split_point, end_time=original_end, speaker=speaker, content=part2_text
+        )
+        db.session.add(new_seg1)
+        db.session.add(new_seg2)
+        
+        new_split1 = Split(
+            record_id=rec.id, segment_index=target_split.segment_index, file_path=f"static/separated/{rec.id}/{part1_name}",
+            start_time=original_start, end_time=split_point, speaker=speaker
+        )
+        new_split2 = Split(
+            record_id=rec.id, segment_index=target_split.segment_index+1, file_path=f"static/separated/{rec.id}/{part2_name}",
+            start_time=split_point, end_time=original_end, speaker=speaker
+        )
+        db.session.add(new_split1)
+        db.session.add(new_split2)
+        
+        for s in splits[segment_index+1:]:
+            s.segment_index += 1
+            
+        db.session.commit()
+        
+        return jsonify({"code": 200, "message": "Split successful"})
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": 500, "message": str(e)}), 500
+
 @main.route("/api/summary/<int:record_id>", methods=["POST"])
 @jwt_required()
 def generate_summary(record_id):
@@ -572,6 +726,38 @@ def generate_summary(record_id):
 # Dashboard 接口
 # ---------------------------------------------------------------------------
 
+@main.route("/api/system/heartbeat", methods=["POST"])
+@jwt_required()
+def system_heartbeat():
+    """
+    系统活跃心跳接口：由前端定时调用。
+    逻辑：若该用户最近一次会话的结束时间在 60 秒内，则更新结束时间；否则开启新会话。
+    以此解决“无法确定结束时间”的问题，将会话持续时间累加进数据库。
+    """
+    uid = int(get_jwt_identity())
+    now = datetime.utcnow()
+    last_session = SystemSession.query.filter_by(user_id=uid).order_by(SystemSession.end_time.desc()).first()
+    
+    # 允许 60 秒的回旋余地（心跳频率通常为 30 秒一次）
+    if last_session and (now - last_session.end_time).total_seconds() < 60:
+        last_session.end_time = now
+    else:
+        new_session = SystemSession(user_id=uid, start_time=now, end_time=now)
+        db.session.add(new_session)
+    
+    db.session.commit()
+    return jsonify({"code": 200, "msg": "Heartbeat received"})
+
+def _get_cumulative_usage_seconds(uid=None):
+    """内部工具函数：计算累计系统使用时长（秒）"""
+    query = db.session.query(
+        func.sum((func.julianday(SystemSession.end_time) - func.julianday(SystemSession.start_time)) * 86400)
+    )
+    if uid is not None:
+        query = query.filter(SystemSession.user_id == uid)
+    res = query.scalar()
+    return float(res) if res else 0.0
+
 @main.route("/api/dashboard/health", methods=["GET"])
 def dashboard_health():
     """
@@ -613,71 +799,44 @@ def dashboard_health():
 @main.route("/api/dashboard/ambient", methods=["GET"])
 def dashboard_ambient():
     """
-    返回地理位置、天气、气温和服务持续运行时间。
-    天气数据通过高德地图免费天气 API 获取（需在 config.py 配置 AMAP_KEY）。
+    返回地理位置、天气、气温和全系统累计运行时间（基于会话累计）。
     """
     import requests as _req
 
-    # WMO 天气码 → 中文描述（Open-Meteo 标准）
+    # WMO 天气码 → 中文描述
     WMO_WEATHER = {
-        0: "晴",
-        1: "晴间多云", 2: "多云", 3: "阴",
-        45: "雾", 48: "冻雾",
-        51: "小毛毛雨", 53: "中毛毛雨", 55: "大毛毛雨",
-        61: "小雨", 63: "中雨", 65: "大雨",
-        71: "小雪", 73: "中雪", 75: "大雪", 77: "冰粒",
-        80: "阵雨", 81: "中阵雨", 82: "强阵雨",
-        85: "小阵雪", 86: "强阵雪",
-        95: "雷暴", 96: "雷暴伴冰雹", 99: "强雷暴伴冰雹",
+        0: "晴", 1: "晴间多云", 2: "多云", 3: "阴", 45: "雾", 48: "冻雾",
+        51: "小毛毛雨", 53: "中毛毛雨", 55: "大毛毛雨", 61: "小雨", 63: "中雨", 65: "大雨",
+        71: "小雪", 73: "中雪", 75: "大雪", 77: "冰粒", 80: "阵雨", 81: "中阵雨", 82: "强阵雨",
+        85: "小阵雪", 86: "强阵雪", 95: "雷暴", 96: "雷暴伴冰雹", 99: "强雷暴伴冰雹",
     }
 
-    # --- Uptime 计算 ---
-    start_time = current_app.config.get("SERVER_START_TIME")
-    if start_time:
-        delta = datetime.utcnow() - start_time
-        total_seconds = int(delta.total_seconds())
-        uptime_days = total_seconds // 86400
-        uptime_hours = (total_seconds % 86400) // 3600
-    else:
-        uptime_days = 0
-        uptime_hours = 0
+    # --- Uptime 计算 (从 SystemSession 统计全系统总的使用时长) ---
+    total_seconds = _get_cumulative_usage_seconds()
+    uptime_days = int(total_seconds // 86400)
+    uptime_hours = int((total_seconds % 86400) // 3600)
 
     location = "未知"
     weather = "无法获取"
     temperature = None
 
     try:
-        # --- 步骤 1：ip-api.com 免费 IP 定位（无需 Key，限速 45次/分钟）---
         geo_resp = _req.get("http://ip-api.com/json/?lang=zh-CN&fields=city,lat,lon,status", timeout=5)
         geo_data = geo_resp.json()
-
         if geo_data.get("status") == "success":
             location = geo_data.get("city", "未知")
-            lat = geo_data.get("lat")
-            lon = geo_data.get("lon")
-
-            # --- 步骤 2：Open-Meteo 免费天气 API（无需 Key，完全开源）---
+            lat, lon = geo_data.get("lat"), geo_data.get("lon")
             if lat is not None and lon is not None:
                 weather_resp = _req.get(
                     "https://api.open-meteo.com/v1/forecast",
-                    params={
-                        "latitude": lat,
-                        "longitude": lon,
-                        "current": "temperature_2m,weathercode",
-                        "timezone": "Asia/Shanghai",
-                    },
+                    params={"latitude": lat, "longitude": lon, "current": "temperature_2m,weathercode", "timezone": "Asia/Shanghai"},
                     timeout=5,
                 )
                 weather_data = weather_resp.json()
                 current = weather_data.get("current", {})
                 wmo_code = current.get("weathercode")
-                temperature = current.get("temperature_2m")
-                if temperature is not None:
-                    temperature = round(temperature)
+                temperature = round(current.get("temperature_2m")) if current.get("temperature_2m") is not None else None
                 weather = WMO_WEATHER.get(wmo_code, f"天气码 {wmo_code}")
-        else:
-            current_app.logger.warning(f"[Dashboard] IP geolocation failed: {geo_data}")
-
     except Exception as e:
         current_app.logger.warning(f"[Dashboard] Ambient fetch failed: {e}")
 
@@ -697,44 +856,28 @@ def dashboard_ambient():
 @jwt_required()
 def dashboard_stats():
     """
-    当前用户的业务速览数据（完全多租户隔离）：
-    - total_transcribed: 该用户 status = 'success' 的记录总数
-    - total_summarized : 该用户已完成 LLM 深度分析的记录总数
-    - uptime_hours     : 该用户所有成功转写音频的累计时长（护航时长），单位小时
+    当前用户的业务速览数据：
+    - uptime_hours/days: 统计该用户在 SystemSession 表中的累计活跃时长。
     """
     uid = int(get_jwt_identity())
 
-    # 1. 累计转写数（仅限当前用户）
-    total_transcribed = AudioRecord.query.filter(
-        AudioRecord.user_id == uid,
-        AudioRecord.status == "success"
-    ).count()
+    # 1. 累计转写数
+    total_transcribed = AudioRecord.query.filter(AudioRecord.user_id == uid, AudioRecord.status == "success").count()
 
-    # 2. 深度总结数（仅限当前用户）
-    total_summarized = AudioRecord.query.filter(
-        AudioRecord.user_id == uid,
-        AudioRecord.llm_summary.isnot(None),
-        AudioRecord.llm_summary != ""
-    ).count()
+    # 2. 深度总结数
+    total_summarized = AudioRecord.query.filter(AudioRecord.user_id == uid, AudioRecord.llm_summary.isnot(None), AudioRecord.llm_summary != "").count()
 
-    # 3. 用户累计有效运行/护航时长 (uptime_hours)
-    # 统计算法：求和该用户下所有处理成功记录的 duration（秒），并换算为小时。
-    # 相比服务器启动时间，这更真实地反映了系统为该用户服务的有效时长。
-    total_seconds_result = db.session.query(
-        func.sum(AudioRecord.duration)
-    ).filter(
-        AudioRecord.user_id == uid,
-        AudioRecord.status == "success"
-    ).scalar()
-
-    total_seconds = float(total_seconds_result) if total_seconds_result else 0.0
-    uptime_hours = int(total_seconds // 3600)
+    # 3. 用户累计系统使用时长 (从会话表计算)
+    total_seconds = _get_cumulative_usage_seconds(uid)
+    uptime_days = int(total_seconds // 86400)
+    uptime_hours = int((total_seconds % 86400) // 3600)
 
     return jsonify({
         "code": 200,
         "data": {
             "total_transcribed": total_transcribed,
             "total_summarized": total_summarized,
+            "uptime_days": uptime_days,
             "uptime_hours": uptime_hours,
         }
     })
