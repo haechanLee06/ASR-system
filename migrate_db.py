@@ -47,6 +47,23 @@ def migrate():
         conn.commit()
     else:
         print("llm_summary column already exists.")
+
+    # --- 2024-04-22 新增：记录标题与最后修改时间 ---
+    if "title" not in columns:
+        print("Adding title column...")
+        cursor.execute("ALTER TABLE audio_record ADD COLUMN title VARCHAR(256)")
+        conn.commit()
+    else:
+        print("title column already exists.")
+
+    if "updated_at" not in columns:
+        print("Adding updated_at column...")
+        cursor.execute("ALTER TABLE audio_record ADD COLUMN updated_at DATETIME")
+        # 为现有记录初始化 updated_at 为 upload_time
+        cursor.execute("UPDATE audio_record SET updated_at = upload_time WHERE updated_at IS NULL")
+        conn.commit()
+    else:
+        print("updated_at column already exists.")
         
     conn.close()
     print("Migration complete.")

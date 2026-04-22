@@ -9,7 +9,7 @@ from flask import Blueprint, render_template, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import inspect, func
 from . import db
-from .models import AudioRecord, DialogueSegment, Split, SystemSession
+from .models import User, AudioRecord, DialogueSegment, Split, SystemSession
 from .services.audio_handler import save_upload_file, convert_to_16k_wav
 from .services.ai_service import AIServiceRunner
 from .services.llm_service import request_local_llm, format_transcript
@@ -343,6 +343,7 @@ def history():
 
             data.append({
                 "id": r.id,
+                "title": r.title,
                 "filename": display_name,
                 "filepath": r.filename,
                 "original_filename": r.original_filename,
@@ -458,12 +459,23 @@ def record_detail(record_id):
                 "audio_url": audio_url,
             })
         
+        # Join with User table to get username
+        user_name = "Unknown"
+        if r.user_id:
+            u = User.query.get(r.user_id)
+            if u:
+                user_name = u.username
+
         # Updated response structure
         data = {
             "info": {
                 "id": r.id,
+                "title": r.title,
+                "original_filename": r.original_filename,
                 "filename": r.filename,
                 "upload_time": r.upload_time.isoformat(),
+                "updated_at": r.updated_at.isoformat() if r.updated_at else r.upload_time.isoformat(),
+                "user_name": user_name,
                 "status": r.status,
                 "error_message": r.error_message,
                 "current_stage": r.current_stage
@@ -504,6 +516,10 @@ def update_segment(record_id, segment_index):
             
         target_segment = segments[segment_index]
         target_segment.content = new_text
+        
+        # 手动触发表记录的时间戳更新 (因为只修改了子表记录)
+        rec.updated_at = datetime.utcnow()
+        
         db.session.commit()
         
         return jsonify({
@@ -547,9 +563,13 @@ def update_segment_speaker(record_id, segment_index):
         target_segment = segments[segment_index]
         target_segment.speaker = new_speaker
         
+        # 同时也需要更新对应的 Split 记录中的角色
         splits = Split.query.filter_by(record_id=record_id).order_by(Split.segment_index.asc()).all()
         if 0 <= segment_index < len(splits):
             splits[segment_index].speaker = new_speaker
+            
+        # 手动触发表记录的时间戳更新
+        rec.updated_at = datetime.utcnow()
             
         db.session.commit()
         
@@ -662,6 +682,9 @@ def split_segment(record_id, segment_index):
         
         for s in splits[segment_index+1:]:
             s.segment_index += 1
+            
+        # 手动触发表记录的时间戳更新
+        rec.updated_at = datetime.utcnow()
             
         db.session.commit()
         
@@ -993,7 +1016,9 @@ def dashboard_recent_records():
         lbl, st = status_map.get(r.status, ("未知", "unknown"))
         data.append({
             "id": r.id,
-            "title": r.original_filename or f"Record #{r.id}",
+            "title": r.title,
+            "original_filename": r.original_filename,
+            "upload_time": r.upload_time.isoformat() if r.upload_time else None,
             "created_at": format_time_ago(r.upload_time),
             "status": st,
             "status_label": lbl
@@ -1003,3 +1028,41 @@ def dashboard_recent_records():
         "code": 200,
         "data": data
     })
+
+@main.route("/record/<int:record_id>/title", methods=["PUT"])
+@jwt_required()
+def update_title(record_id):
+    req_json = request.get_json()
+    if not req_json or 'title' not in req_json:
+        return jsonify({"code": 400, "message": "Missing 'title' field"}), 400
+        
+    new_title = req_json['title']
+    
+    try:
+        inspector = inspect(db.engine)
+        cols = [c['name'] for c in inspector.get_columns('audio_record')]
+        rec = AudioRecord.query.get(record_id)
+        if not rec:
+            return jsonify({"code": 404, "message": "记录不存在"}), 404
+            
+        if 'user_id' in cols:
+            uid = int(get_jwt_identity())
+            if rec.user_id is not None and rec.user_id != uid:
+                return jsonify({"code": 403, "message": "无权访问该记录"}), 403
+                
+        rec.title = new_title
+        db.session.commit()
+        
+        return jsonify({
+            "code": 200, 
+            "message": "Title updated successfully", 
+            "data": {
+                "id": record_id, 
+                "title": new_title,
+                "updated_at": rec.updated_at.isoformat() if rec.updated_at else datetime.utcnow().isoformat()
+            }
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": 500, "message": str(e)}), 500

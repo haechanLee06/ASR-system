@@ -21,6 +21,10 @@ class AudioRecord(db.Model):
     upload_time = db.Column(db.DateTime, default=datetime.utcnow)
     # 状态：默认为 'pending'
     status = db.Column(db.String(20), default="pending")
+    # 记录自定义名称
+    title = db.Column(db.String(256), nullable=True)
+    # 最后修改时间 (自动跟随 update 操作更新)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     # 错误信息
     error_message = db.Column(db.Text, nullable=True)
     current_stage = db.Column(db.String(100), default="等待处理")
