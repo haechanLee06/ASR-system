@@ -10,7 +10,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import inspect, func
 from . import db
 from .models import User, AudioRecord, DialogueSegment, Split, SystemSession
-from .services.audio_handler import save_upload_file, convert_to_16k_wav
+from .services.audio_handler import save_upload_file, convert_to_16k_wav, is_video_file, probe_has_audio
 from .services.ai_service import AIServiceRunner
 from .services.llm_service import request_local_llm, format_transcript
 from .utils.wsl_bridge import run_in_wsl
@@ -84,7 +84,10 @@ def process_audio_background(app, record_id, temp_path):
             db.session.commit()
 
             rec.status = 'processing'
-            rec.current_stage = "正在转码音频格式..."
+            if is_video_file(temp_path):
+                rec.current_stage = "正在从视频中提取音频..."
+            else:
+                rec.current_stage = "正在转码音频格式..."
             rec.status = 'processing'
             db.session.commit()
             app.logger.info(f"[Thread] Status updated to processing for {record_id}")
@@ -224,6 +227,18 @@ def upload():
         print("[UPLOAD] request received")
         temp_path = save_upload_file(file)
         print(f"[UPLOAD] temp_path={temp_path}")
+
+        # 视频文件预检：探测是否包含音频流
+        if is_video_file(file.filename):
+            print(f"[UPLOAD] 检测到视频文件，正在探测音频流...")
+            if not probe_has_audio(temp_path):
+                import os as _os
+                try:
+                    _os.remove(temp_path)
+                except Exception:
+                    pass
+                return jsonify({"code": 400, "msg": "该视频文件不包含音频轨道，无法转录"}), 400
+            print(f"[UPLOAD] 视频音频流探测通过，将提取音频进行转录")
         
         current_user_id = int(get_jwt_identity())
         

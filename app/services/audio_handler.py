@@ -11,6 +11,12 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 UPLOADS_DIR = os.path.join(STATIC_DIR, "uploads")
 TEMP_DIR = os.path.join(UPLOADS_DIR, "temp")
 
+# 支持上传的视频扩展名白名单
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v", ".ts", ".mpeg", ".mpg"}
+
+# 支持上传的音频扩展名白名单
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".wma", ".opus", ".amr"}
+
 def _ensure_dirs():
     os.makedirs(UPLOADS_DIR, exist_ok=True)
     os.makedirs(TEMP_DIR, exist_ok=True)
@@ -42,6 +48,55 @@ def _run(cmd, use_wsl: bool):
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
         return proc.returncode, proc.stdout or "", proc.stderr or ""
 
+def is_video_file(filename: str) -> bool:
+    """根据文件扩展名判断是否为视频文件。"""
+    ext = os.path.splitext(filename)[1].lower()
+    return ext in VIDEO_EXTENSIONS
+
+
+def probe_has_audio(file_path: str) -> bool:
+    """
+    使用 ffprobe 探测文件中是否包含音频流。
+    兼容 WSL 环境（当 Windows 本地无 ffprobe 时通过 WSL 调用）。
+    """
+    try:
+        ffprobe_bin = current_app.config.get("FFPROBE_BIN", "ffprobe")
+        use_wsl = shutil.which(ffprobe_bin) is None
+
+        def _win_to_wsl(p):
+            p = os.path.abspath(p)
+            drive = p[0].lower()
+            rest = p[2:].replace("\\", "/")
+            return f"/mnt/{drive}/{rest}"
+
+        if use_wsl:
+            distro = current_app.config.get("WSL_DISTRO", "Ubuntu-20.04")
+            cmd = [
+                "wsl", "-d", distro, "--", "ffprobe",
+                "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=codec_type",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                _win_to_wsl(file_path),
+            ]
+            rc, out, _ = _run(cmd, use_wsl=True)
+        else:
+            cmd = [
+                ffprobe_bin,
+                "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=codec_type",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                file_path,
+            ]
+            rc, out, _ = _run(cmd, use_wsl=False)
+
+        return rc == 0 and out.strip() != ""
+    except Exception:
+        # 探测失败时保守地返回 True，交由后续 ffmpeg 转码报错
+        return True
+
+
 def save_upload_file(file_storage):
     """保存用户上传的原始文件到临时目录，保留原扩展名。"""
     _ensure_dirs()
@@ -53,14 +108,20 @@ def save_upload_file(file_storage):
 
 def convert_to_16k_wav(input_path):
     """
-    将输入音频转码为 16kHz 单声道 WAV，输出文件命名为 {timestamp}_{uuid}.wav。
+    将输入音频/视频转码为 16kHz 单声道 WAV，输出文件命名为 {timestamp}_{uuid}.wav。
+    若输入为视频文件，自动提取其中的音频轨道进行转码。
     返回 (系统相对路径, 时长秒)。
     """
     _ensure_dirs()
     ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
     safe_name = f"{ts}_{uuid4().hex}.wav"
     out_abs = os.path.join(UPLOADS_DIR, safe_name)
-    print("正在开始转码...")
+
+    # 判断是否为视频文件，打印对应日志
+    if is_video_file(input_path):
+        print("[CONVERT] 检测到视频文件，正在提取音频轨道...")
+    else:
+        print("正在开始转码...")
     ffmpeg_bin = current_app.config.get("FFMPEG_BIN", "ffmpeg")
     def _win_to_wsl(p):
         p = os.path.abspath(p)
