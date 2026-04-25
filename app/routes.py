@@ -9,7 +9,7 @@ from flask import Blueprint, render_template, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import inspect, func
 from . import db
-from .models import User, AudioRecord, DialogueSegment, Split, SystemSession
+from .models import User, AudioRecord, DialogueSegment, Split, SystemSession, VoicePrint, RecordSpeaker
 from .services.audio_handler import save_upload_file, convert_to_16k_wav, is_video_file, probe_has_audio
 from .services.ai_service import AIServiceRunner
 from .services.llm_service import request_local_llm, format_transcript
@@ -119,13 +119,47 @@ def process_audio_background(app, record_id, temp_path):
             result = run_in_wsl(ai_script_rel, abs_in)
             app.logger.info(f"[AI] segments_count={len(result)}")
 
+            # ================= [VOICEPRINT STORAGE] =================
+            # 不再在此处进行自动匹配映射，而是将每个 SPK 的特征存下来
+            try:
+                import numpy as np
+                import uuid
+                spk_embeddings_saved = set()
+                
+                # 建立该记录的特征存储目录
+                record_vps_dir = os.path.join(current_app.root_path, "static", "record_speakers", str(rec.id))
+                os.makedirs(record_vps_dir, exist_ok=True)
+
+                for item in result:
+                    raw_spk = str(item.get("speaker", "spk0"))
+                    if raw_spk in spk_embeddings_saved:
+                        continue
+                    
+                    emb_data = item.get("embedding", None)
+                    if emb_data:
+                        # 存为 npy
+                        fname = f"{raw_spk}_{uuid.uuid4().hex[:8]}.npy"
+                        fpath_rel = f"static/record_speakers/{rec.id}/{fname}"
+                        fpath_abs = os.path.join(record_vps_dir, fname)
+                        np.save(fpath_abs, np.array(emb_data))
+                        
+                        # 记录到 DB
+                        rs = RecordSpeaker(record_id=rec.id, raw_spk=raw_spk, embedding_path=fpath_rel)
+                        db.session.add(rs)
+                        spk_embeddings_saved.add(raw_spk)
+                db.session.commit()
+            except Exception as ex:
+                app.logger.error(f"[VOICEPRINT] storage error: {str(ex)}")
+            # =========================================================
+
             sep_root = os.path.join(current_app.root_path, "static", "separated", str(rec.id))
             _ensure_dir(sep_root)
             
             payload = []
             for idx, item in enumerate(result):
                 app.logger.info(f"[CUT] idx={idx} item={item}")
-                speaker = str(item.get("speaker", "spk0"))
+                speaker_raw = str(item.get("speaker", "spk0"))
+                speaker = speaker_raw
                 text = str(item.get("text", ""))
                 start = float(item.get("start", 0.0))
                 end = float(item.get("end", start))
@@ -394,35 +428,31 @@ def get_transcript_data(record_id):
         # 2. 获取原始 segments
         segments = DialogueSegment.query.filter_by(record_id=record_id).order_by(DialogueSegment.start_time).all()
         
-        # 3. 数据清洗与增强
+        # 3. 数据处理
         display_data = []
         llm_context_lines = []
         
-        # 映射规则：spk0 -> A, spk1 -> B
-        role_map = {
-            "spk0": {"role": "A", "side": "left"},
-            "spk1": {"role": "B", "side": "right"}
-        }
-        
         for idx, seg in enumerate(segments, 1):
-            # 获取映射信息，默认 fallback 到 Unknown/left
-            spk_info = role_map.get(seg.speaker, {"role": "Unknown", "side": "left"})
+            raw_speaker = seg.speaker if seg.speaker else "spk0"
             
-            # 构建前端展示数据
+            # 简单侧边判定 (前端会根据顺序进一步优化，这里提供基础参考)
+            side = "left"
+            if "spk1" in raw_speaker or "spk3" in raw_speaker:
+                side = "right"
+            
             item = {
                 "seq_id": idx,
-                "role": spk_info["role"],
-                "side": spk_info["side"],
+                "spk": raw_speaker,
+                "side": side,
                 "text": seg.content if seg.content else "",
                 "start_time": seg.start_time,
                 "end_time": seg.end_time,
-                "speaker": seg.speaker # 保留原始标签备查
+                "speaker": raw_speaker
             }
             display_data.append(item)
             
             # 构建 LLM 上下文行
-            # 格式：[seq_id] 角色{role}: {text}
-            line = f"[{idx}] 角色{spk_info['role']}: {item['text']}"
+            line = f"[{idx}] {raw_speaker}: {item['text']}"
             llm_context_lines.append(line)
             
         # 4. 返回结果
@@ -481,6 +511,13 @@ def record_detail(record_id):
             if u:
                 user_name = u.username
 
+        # 获取用户名用于返回
+        user_name = "Unknown"
+        if rec.user_id:
+            user_obj = User.query.get(rec.user_id)
+            if user_obj:
+                user_name = user_obj.username
+
         # Updated response structure
         data = {
             "info": {
@@ -493,7 +530,8 @@ def record_detail(record_id):
                 "user_name": user_name,
                 "status": r.status,
                 "error_message": r.error_message,
-                "current_stage": r.current_stage
+                "current_stage": r.current_stage,
+                "voiceprint_status": r.voiceprint_status # 返回声纹匹配状态
             },
             "segments": payload,
         }
@@ -1081,3 +1119,221 @@ def update_title(record_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({"code": 500, "message": str(e)}), 500
+
+# ---------------------------------------------------------------------------
+# 声纹库 (VoicePrint) 管理接口
+# ---------------------------------------------------------------------------
+
+@main.route("/api/voiceprint/enroll", methods=["POST"])
+@jwt_required()
+def enroll_voiceprint():
+    person_name = request.form.get("person_name")
+    file = request.files.get("file")
+    
+    if not person_name or not file or file.filename == "":
+        return jsonify({"code": 400, "msg": "缺失姓名或音频文件"}), 400
+        
+    try:
+        current_user_id = int(get_jwt_identity())
+        
+        # 1. Check if name already exists for user
+        exists = VoicePrint.query.filter_by(user_id=current_user_id, person_name=person_name).first()
+        if exists:
+            return jsonify({"code": 400, "msg": "该姓名已在声纹库中"}), 400
+            
+        print(f"[VP_ENROLL] Received name={person_name}, file={file.filename}")
+        
+        # 2. Save upload file
+        temp_path = save_upload_file(file)
+        
+        # 3. 转码获取 16k wav 用于提取
+        try:
+            rel_path, duration = convert_to_16k_wav(temp_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+                
+        abs_in = os.path.join(current_app.root_path, rel_path)
+        
+        # 4. Invoke WSL service to extract embedding
+        script_path = "app/services/voiceprint_service.py"
+        print(f"[VP_ENROLL] extracting embedding...")
+        vp_res = run_in_wsl(script_path, abs_in)
+        
+        if not vp_res or "embedding" not in vp_res:
+            raise ValueError(vp_res.get("error", "Failed to extract embedding"))
+            
+        embedding = vp_res["embedding"]
+        
+        # 5. Save embedding locally as .npy
+        vp_dir = os.path.join(current_app.root_path, "static", "voiceprints", str(current_user_id))
+        os.makedirs(vp_dir, exist_ok=True)
+        import uuid
+        npy_filename = f"{uuid.uuid4().hex}.npy"
+        npy_rel_path = f"static/voiceprints/{current_user_id}/{npy_filename}"
+        npy_abs_path = os.path.join(vp_dir, npy_filename)
+        
+        import numpy as np
+        np.save(npy_abs_path, np.array(embedding))
+        
+        # 6. Save to DB
+        vp = VoicePrint(
+            user_id=current_user_id,
+            person_name=person_name,
+            source_filename=file.filename,
+            embedding_path=npy_rel_path
+        )
+        db.session.add(vp)
+        db.session.commit()
+        
+        # 删掉暂存音频
+        if os.path.exists(abs_in):
+            os.remove(abs_in)
+            
+        return jsonify({"code": 200, "msg": "声纹入库成功"})
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"code": 500, "msg": f"入库失败: {str(e)}"}), 500
+
+
+@main.route("/api/voiceprint/list", methods=["GET"])
+@jwt_required()
+def list_voiceprints():
+    try:
+        current_user_id = int(get_jwt_identity())
+        vps = VoicePrint.query.filter_by(user_id=current_user_id).order_by(VoicePrint.created_at.desc()).all()
+        
+        data = [{
+            "id": v.id,
+            "person_name": v.person_name,
+            "source_filename": v.source_filename,
+            "created_at": v.created_at.strftime("%Y-%m-%d %H:%M:%S") if v.created_at else ""
+        } for v in vps]
+        
+        return jsonify({"code": 200, "data": data})
+    except Exception as e:
+        return jsonify({"code": 500, "msg": str(e)}), 500
+
+
+@main.route("/api/voiceprint/<int:vp_id>", methods=["DELETE"])
+@jwt_required()
+def delete_voiceprint(vp_id):
+    try:
+        current_user_id = int(get_jwt_identity())
+        vp = VoicePrint.query.get(vp_id)
+        
+        if not vp:
+            return jsonify({"code": 404, "msg": "声纹记录不存在"}), 404
+        if vp.user_id != current_user_id:
+            return jsonify({"code": 403, "msg": "无权操作"}), 403
+            
+        # 删掉本地 npy
+        abs_path = os.path.join(current_app.root_path, vp.embedding_path)
+        if os.path.exists(abs_path):
+            os.remove(abs_path)
+            
+        db.session.delete(vp)
+        db.session.commit()
+        return jsonify({"code": 200, "msg": "删除成功"})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": 500, "msg": str(e)}), 500
+
+@main.route("/api/voiceprint/match_suggestions/<int:record_id>", methods=["GET"])
+@jwt_required()
+def get_match_suggestions(record_id):
+    """
+    点进详情页时调用。
+    比对该记录保存的原始 spk 特征与声纹库。
+    """
+    try:
+        current_user_id = int(get_jwt_identity())
+        rec = AudioRecord.query.get(record_id)
+        if not rec or rec.user_id != current_user_id:
+            return jsonify({"code": 403, "msg": "记录不存在或无权访问"}), 403
+            
+        # 1. 载入用户的声纹库
+        vps = VoicePrint.query.filter_by(user_id=current_user_id).all()
+        if not vps:
+            return jsonify({"code": 200, "data": [], "msg": "声纹库为空"})
+            
+        import numpy as np
+        vp_dict = {}
+        for vp in vps:
+            vp_abs = os.path.join(current_app.root_path, vp.embedding_path)
+            if os.path.exists(vp_abs):
+                vp_dict[vp.person_name] = np.load(vp_abs)
+        
+        # 2. 载入记录中提取出的 spk 特征
+        record_spks = RecordSpeaker.query.filter_by(record_id=record_id).all()
+        
+        suggestions = []
+        for rs in record_spks:
+            rs_abs = os.path.join(current_app.root_path, rs.embedding_path)
+            if not os.path.exists(rs_abs):
+                continue
+                
+            seg_emb = np.load(rs_abs)
+            best_score = -1
+            best_name = None
+            
+            for name, vp_emb in vp_dict.items():
+                # 余弦相似度计算
+                score = np.dot(seg_emb, vp_emb) / (np.linalg.norm(seg_emb) * np.linalg.norm(vp_emb) + 1e-6)
+                if score > best_score:
+                    best_score = score
+                    best_name = name
+            
+            # 只有大于 0.65 才建议匹配（适应实际测试环境中的特征波动）
+            if best_score >= 0.65 and best_name is not None:
+                suggestions.append({
+                    "raw_spk": rs.raw_spk,
+                    "suggested_name": best_name,
+                    "score": float(best_score)
+                })
+        
+        return jsonify({"code": 200, "data": suggestions})
+        
+    except Exception as e:
+        return jsonify({"code": 500, "msg": str(e)}), 500
+
+
+@main.route("/api/voiceprint/apply_mapping/<int:record_id>", methods=["POST"])
+@jwt_required()
+def apply_voiceprint_mapping(record_id):
+    """
+    用户确认弹窗后调用。
+    将指定的 raw_spk 替换为真实姓名。
+    """
+    req_json = request.get_json()
+    # 负载格式: { "spk0": "张三", "spk1": "李四" }
+    mapping = req_json.get("mapping", {})
+    
+    if not mapping:
+        # 如果用户选择不匹配，直接标记为已处理
+        rec = AudioRecord.query.get(record_id)
+        if rec:
+            rec.voiceprint_status = 1
+            db.session.commit()
+        return jsonify({"code": 200, "msg": "已跳过匹配"})
+        
+    try:
+        current_user_id = int(get_jwt_identity())
+        rec = AudioRecord.query.get(record_id)
+        if not rec or rec.user_id != current_user_id:
+            return jsonify({"code": 403, "msg": "记录不存在或无权访问"}), 403
+            
+        # 批量更新 DialogueSegment
+        for raw_spk, real_name in mapping.items():
+            DialogueSegment.query.filter_by(record_id=record_id, speaker=raw_spk).update({"speaker": real_name})
+            Split.query.filter_by(record_id=record_id, speaker=raw_spk).update({"speaker": real_name})
+            
+        rec.voiceprint_status = 1 # 标记已处理，后续进入详情页不再弹窗
+        db.session.commit()
+        
+        return jsonify({"code": 200, "msg": "身份映射应用成功"})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": 500, "msg": str(e)}), 500

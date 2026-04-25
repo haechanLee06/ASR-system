@@ -72,7 +72,7 @@ def run_in_wsl(script_rel_path, audio_path, *extra_args):
     valid_json = None
     for line in reversed(res.stdout.splitlines()):
         line = line.strip()
-        if line.startswith('[') and line.endswith(']'):
+        if (line.startswith('[') and line.endswith(']')) or (line.startswith('{') and line.endswith('}')):
             try:
                 valid_json = json.loads(line)
                 break

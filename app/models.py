@@ -30,6 +30,8 @@ class AudioRecord(db.Model):
     current_stage = db.Column(db.String(100), default="等待处理")
     # 用于持久化存储 AI（LLM）生成的报告
     llm_summary = db.Column(db.Text, nullable=True)
+    # 声纹库匹配状态：0-未匹配，1-已处理匹配（弹窗过且已操作）
+    voiceprint_status = db.Column(db.Integer, default=0)
 
     def __repr__(self):
         return f"<AudioRecord {self.original_filename}>"
@@ -63,3 +65,36 @@ class SystemSession(db.Model):
 
     def __repr__(self):
         return f"<SystemSession {self.user_id} {self.start_time} to {self.end_time}>"
+
+class VoicePrint(db.Model):
+    """声纹库：存储用户注册的声纹身份。
+    
+    每条记录对应一个"真实身份"，转录完成后系统会将 diarization
+    输出的 spkX 标签与库中 embedding 做 cosine 匹配，匹配成功则
+    自动替换为 person_name。
+    """
+    __tablename__ = "voice_print"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # 归属用户（用户隔离：每个用户只能看到和匹配自己的声纹）
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    # 该声纹对应的真实人名，转录后用于替换 spkX
+    person_name = db.Column(db.String(128), nullable=False)
+    # 入库时上传的原始音频文件名，仅用于展示
+    source_filename = db.Column(db.String(256), nullable=True)
+    # CAM++ embedding（.npy）在服务器上的相对路径
+    # 例如: static/voiceprints/1/abc123.npy
+    embedding_path = db.Column(db.String(512), nullable=False)
+    # 入库时间
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<VoicePrint uid={self.user_id} name={self.person_name}>"
+
+class RecordSpeaker(db.Model):
+    """存储某次转录记录中发现的原始说话人（SPKX）的特征向量。"""
+    __tablename__ = "record_speaker"
+    id = db.Column(db.Integer, primary_key=True)
+    record_id = db.Column(db.Integer, db.ForeignKey("audio_record.id"), nullable=False)
+    raw_spk = db.Column(db.String(50), nullable=False) # "spk0", "spk1"
+    embedding_path = db.Column(db.String(512), nullable=False) # .npy 路径

@@ -3,6 +3,7 @@ import sys
 import torchaudio
 import torch
 import importlib.util
+import numpy as np
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(current_dir))
@@ -63,6 +64,7 @@ class DiarizationService:
         if not os.path.exists(out_dir):
             os.makedirs(out_dir)
         results = []
+        spk_embs = {}
         wav, sr = torchaudio.load(audio_path)
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
         
@@ -101,15 +103,36 @@ class DiarizationService:
                 # project_root is defined at module level
                 rel_path = os.path.relpath(save_path, project_root).replace("\\", "/")
                 
+                spk_str = f"spk{spk_id}"
                 results.append({
-                    "spk": f"spk{spk_id}",
+                    "spk": spk_str,
                     "start": float(start),
                     "end": float(end),
                     "file": rel_path
                 })
+                
+                # Extract embedding
+                try:
+                    feat = self.diarizer.feature_extractor(sub_wav).unsqueeze(0).to(self.diarizer.device)
+                    with torch.no_grad():
+                        emb = self.diarizer.embedding_model(feat).detach().squeeze(0).cpu().numpy()
+                    if spk_str not in spk_embs:
+                        spk_embs[spk_str] = []
+                    spk_embs[spk_str].append(emb)
+                except Exception as e:
+                    print(f"[AI] Embedding extraction failed for segment {i}: {str(e)}", file=sys.stderr)
+
+            # Calculate average normalized embedding per speaker
+            spk_emb_avg = {}
+            for spk, embs in spk_embs.items():
+                avg = np.mean(embs, axis=0)
+                avg = avg / (np.linalg.norm(avg) + 1e-6)
+                spk_emb_avg[spk] = avg.tolist()
+                
+            return results, spk_emb_avg
         else:
             print("[AI] Error: 3D-Speaker unavailable. Fallback disabled as per requirement.", file=sys.stderr)
             # Strict requirement: No fallback.
-            return []
-                
-        return results
+            return [], {}
+        
+        return results, {}

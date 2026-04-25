@@ -143,7 +143,7 @@ class AIServiceRunner:
             out_dir = os.path.join(base_dir, "app", "static", "separated", base_name)
             print(f"[AI] diarization out_dir={out_dir}", file=sys.stderr)
             
-            segs = self.diarizer.separate(audio_path, out_dir)
+            segs, spk_embs = self.diarizer.separate(audio_path, out_dir)
             print(f"[3D-Speaker] segments_count = {len(segs)}", file=sys.stderr)
             
             final_output = []
@@ -191,7 +191,8 @@ class AIServiceRunner:
                     "text": cleaned,
                     "start": start,
                     "end": end,
-                    "path": rel_path
+                    "path": rel_path,
+                    "embedding": spk_embs.get(spk)
                 })
 
             merged = final_output
