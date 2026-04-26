@@ -504,17 +504,10 @@ def record_detail(record_id):
                 "audio_url": audio_url,
             })
         
-        # Join with User table to get username
-        user_name = "Unknown"
-        if r.user_id:
-            u = User.query.get(r.user_id)
-            if u:
-                user_name = u.username
-
         # 获取用户名用于返回
         user_name = "Unknown"
-        if rec.user_id:
-            user_obj = User.query.get(rec.user_id)
+        if r.user_id:
+            user_obj = User.query.get(r.user_id)
             if user_obj:
                 user_name = user_obj.username
 
@@ -1241,6 +1234,42 @@ def delete_voiceprint(vp_id):
         db.session.rollback()
         return jsonify({"code": 500, "msg": str(e)}), 500
 
+@main.route("/api/voiceprint/<int:vp_id>", methods=["PUT"])
+@jwt_required()
+def update_voiceprint(vp_id):
+    req_json = request.get_json()
+    new_name = (req_json.get("person_name") or "").strip()
+    if not new_name:
+        return jsonify({"code": 400, "msg": "姓名不能为空"}), 400
+        
+    try:
+        current_user_id = int(get_jwt_identity())
+        vp = VoicePrint.query.get(vp_id)
+        if not vp:
+            return jsonify({"code": 404, "msg": "声纹记录不存在"}), 404
+        if vp.user_id != current_user_id:
+            return jsonify({"code": 403, "msg": "无权操作"}), 403
+            
+        old_name = vp.person_name
+        if new_name != old_name:
+            exists = VoicePrint.query.filter_by(user_id=current_user_id, person_name=new_name).first()
+            if exists:
+                return jsonify({"code": 400, "msg": "该姓名已存在"}), 400
+                
+            vp.person_name = new_name
+            # 同步更新历史所有相关联的发言人名称
+            records = AudioRecord.query.filter_by(user_id=current_user_id).all()
+            record_ids = [r.id for r in records]
+            if record_ids:
+                DialogueSegment.query.filter(DialogueSegment.record_id.in_(record_ids), DialogueSegment.speaker == old_name).update({"speaker": new_name}, synchronize_session=False)
+                Split.query.filter(Split.record_id.in_(record_ids), Split.speaker == old_name).update({"speaker": new_name}, synchronize_session=False)
+                
+        db.session.commit()
+        return jsonify({"code": 200, "msg": "名称修改成功"})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": 500, "msg": str(e)}), 500
+
 @main.route("/api/voiceprint/match_suggestions/<int:record_id>", methods=["GET"])
 @jwt_required()
 def get_match_suggestions(record_id):
@@ -1337,3 +1366,57 @@ def apply_voiceprint_mapping(record_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({"code": 500, "msg": str(e)}), 500
+
+
+
+
+@main.route("/api/voiceprint/<int:vp_id>/history", methods=["GET"])
+@jwt_required()
+def get_voiceprint_history(vp_id):
+    """
+    根据声纹 ID 查找该说话人在 DialogueSegment 中所有匹配的记录。
+    返回关联的 AudioRecord 列表，包含标题、时间、以及该角色在该音频中的话语段数。
+    """
+    try:
+        current_user_id = int(get_jwt_identity())
+        
+        # 1. 查找声纹身份
+        vp = VoicePrint.query.filter_by(id=vp_id, user_id=current_user_id).first()
+        if not vp:
+            return jsonify({"code": 404, "msg": "声纹记录不存在"}), 404
+            
+        target_name = vp.person_name
+        
+        # 2. 统计此人在各音频中的发言记录
+        # 使用 SQLAlchemy 的 join 和 group_by 进行高效聚合
+        query_results = db.session.query(
+            AudioRecord.id,
+            AudioRecord.title,
+            AudioRecord.original_filename,
+            AudioRecord.upload_time,
+            func.count(DialogueSegment.id).label("count")
+        ).join(DialogueSegment, AudioRecord.id == DialogueSegment.record_id) \
+         .filter(AudioRecord.user_id == current_user_id) \
+         .filter(DialogueSegment.speaker == target_name) \
+         .group_by(AudioRecord.id) \
+         .order_by(AudioRecord.upload_time.desc()) \
+         .all()
+         
+        data = []
+        for r in query_results:
+            data.append({
+                "record_id": r.id,
+                "title": r.title if r.title else r.original_filename,
+                "upload_time": r.upload_time.strftime("%Y-%m-%d %H:%M:%S") if r.upload_time else "",
+                "segment_count": r.count
+            })
+            
+        return jsonify({
+            "code": 200,
+            "data": data,
+            "person_name": target_name
+        })
+        
+    except Exception as e:
+        return jsonify({"code": 500, "msg": str(e)}), 500
+

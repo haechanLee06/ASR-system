@@ -1,9 +1,9 @@
 # ASR-System 后端底层架构与 API 深度报告
 
-> **生成时间**：2026-03-26  
-> **代码版本**：基于 DEVLOG.md 第19条目（Dashboard 词云与最近记录接口）  
+> **生成时间**：2026-04-26  
+> **代码版本**：基于声纹识别持久化方案（2026-04 最新迭代）  
 > **用途**：毕业论文数据库E-R图、系统时序图、算法流程图绘制参考  
-> **技术栈**：Python 3.x · Flask · Flask-SQLAlchemy · Flask-JWT-Extended · Flask-CORS · SQLite · FunASR · 3D-Speaker · Ollama
+> **技术栈**：Python 3.x · Flask · Flask-SQLAlchemy · Flask-JWT-Extended · Flask-CORS · SQLite · FunASR · 3D-Speaker · Ollama · CAM++(VoicePrint)
 
 ---
 
@@ -37,9 +37,9 @@ my_voice_project/
 │   ├── static/
 │   │   ├── uploads/                # 上传音频存储目录
 │   │   │   └── temp/               # 临时文件暂存区（处理后自动清除）
-│   │   └── separated/              # 切割分段音频存储
-│   │       └── {record_id}/        # 按记录ID分目录
-│   │           └── {0000~N}.wav    # 各说话人分段文件（4位数命名）
+│   │   ├── separated/              # 切割分段音频存储（按记录ID分目录）
+│   │   ├── voiceprints/            # 声纹库注册特征存储 (.npy)
+│   │   └── record_speakers/        # 单次录音提取的各说话人特征 (.npy)
 │   └── templates/                  # Jinja2 HTML 模板
 │
 ├── models/                         # 本地AI模型目录（不提交Git）
@@ -67,7 +67,7 @@ my_voice_project/
 │  ┌─────────────┐  ┌──────────────────────────────────────────────┐  │
 │  │ auth 蓝图    │  │                main 蓝图                     │  │
 │  │/auth/register│  │/upload  /record/<id>  /history              │  │
-│  │/auth/login   │  │/api/summary/<id>  /api/dashboard/*          │  │
+│  │/auth/login   │  │/api/summary/<id>  /api/voiceprint/*         │  │
 │  └─────────────┘  └─────────────────┬────────────────────────────┘  │
 │                                     │                                │
 │  ┌──────────────────────────────────▼─────────────────────────────┐ │
@@ -77,7 +77,7 @@ my_voice_project/
 │                                     │                                │
 │  ┌──────────────────────────────────▼─────────────────────────────┐ │
 │  │              SQLAlchemy ORM + SQLite (voice_data.db)            │ │
-│  │         User | AudioRecord | DialogueSegment | Split            │ │
+│  │ User | AudioRecord | DialogueSegment | Split | VoicePrint | RS  │ │
 │  └─────────────────────────────────────────────────────────────────┘ │
 │                                     │                                │
 │  ┌──────────────────────────────────▼─────────────────────────────┐ │
@@ -148,6 +148,7 @@ my_voice_project/
 | `error_message` | `db.Text` | `TEXT` | ✅ 可为空 | NULL | 失败时的错误信息 |
 | `current_stage` | `db.String(100)` | `VARCHAR(100)` | ✅ 可为空 | `"等待处理"` | 细粒度阶段描述，前端轮询展示（如"正在转码音频格式..."） |
 | `llm_summary` | `db.Text` | `TEXT` | ✅ 可为空 | NULL | LLM 生成的 JSON 格式心理分析报告（序列化字符串） |
+| `voiceprint_status` | `db.Integer` | `INTEGER` | ✅ 可为空 | `0` | 声纹匹配状态：0-未匹配，1-已处理映射 |
 
 **外键约束**：
 - `audio_record.user_id → user.id`  
@@ -195,20 +196,54 @@ my_voice_project/
 
 ---
 
-### 2.6 E-R 关系汇总
+### 2.6 表 5：`voice_print`（对应模型类 `VoicePrint`）
+
+**SQLAlchemy 定义文件**：`app/models.py:69-89`
+
+| 字段名 | SQLAlchemy 类型 | 物理类型 | Nullable | Default | 说明 |
+|--------|-----------------|----------|----------|---------|------|
+| `id` | `db.Integer` | `INTEGER` | NOT NULL | 自增 | 主键 |
+| `user_id` | `db.Integer, ForeignKey("user.id")` | `INTEGER` | NOT NULL | — | 归属用户 ID (支持用户间声纹隔离) |
+| `person_name` | `db.String(128)` | `VARCHAR` | NOT NULL | — | 说话人真实姓名 (认证身份) |
+| `source_filename` | `db.String(256)` | `VARCHAR` | ✅ 可为空 | — | 注册时提供的原始音频名 |
+| `embedding_path` | `db.String(512)` | `VARCHAR` | NOT NULL | — | CAM++ 提取的 .npy 特征文件存储路径 |
+| `created_at` | `db.DateTime` | `DATETIME` | ✅ 可为空 | `utcnow` | 入库时间 |
+
+---
+
+### 2.7 表 6：`record_speaker`（对应模型类 `RecordSpeaker`）
+
+**SQLAlchemy 定义文件**：`app/models.py:94-101`
+
+| 字段名 | SQLAlchemy 类型 | 物理类型 | Nullable | Default | 说明 |
+|--------|-----------------|----------|----------|---------|------|
+| `id` | `db.Integer` | `INTEGER` | NOT NULL | 自增 | 主键 |
+| `record_id` | `db.Integer, ForeignKey("audio_record.id")` | `INTEGER` | NOT NULL | — | 关联的音频记录 ID |
+| `raw_spk` | `db.String(50)` | `VARCHAR` | NOT NULL | — | 原始标签 (如 `spk0`) |
+| `embedding_path` | `db.String(512)` | `VARCHAR` | NOT NULL | — | 该录音中提取的该 SPK 特征路径 |
+
+---
+
+### 2.8 E-R 关系汇总
 
 ```
 User (1) ──────────────────── (0..N) AudioRecord
              user_id (FK, nullable)
 
 AudioRecord (1) ────────────── (0..N) DialogueSegment
-                  record_id (FK, NOT NULL)
+                   record_id (FK, NOT NULL)
 
 AudioRecord (1) ────────────── (0..N) Split
-                  record_id (FK, NOT NULL)
+                   record_id (FK, NOT NULL)
 
 User (1) ───────────────────── (0..N) SystemSession
-                  user_id (FK, NOT NULL)
+                   user_id (FK, NOT NULL)
+
+User (1) ───────────────────── (0..N) VoicePrint
+                   user_id (FK, NOT NULL)
+
+AudioRecord (1) ────────────── (0..N) RecordSpeaker
+                   record_id (FK, NOT NULL)
 ```
 
 > **关键设计决策**：
@@ -425,8 +460,41 @@ User (1) ───────────────────── (0..N) 
 
 | 场景 | HTTP 状态码 | 响应 JSON |
 |------|------------|-----------|
-| 修改成功 | `200 OK` | `{"code": 200, "message": "Segment updated successfully", "data": {"index": 0, "new_text": "修改后的文字内容"}}` |
+| 修改成功 | `200 OK` | `{"code": 200, "message": "Segment updated successfully", "data": {"index": 0, "new_text": "..."}}` |
 | 缺少 text 字段 | `400 Bad Request` | `{"code": 400, "message": "Missing 'text' field"}` |
+
+---
+
+#### `PUT /record/<int:record_id>/segment/<int:segment_index>/speaker` — 修改分段说话人
+
+| 属性 | 值 |
+|------|----|
+| HTTP 方法 | `PUT` |
+| URL | `/record/<int:record_id>/segment/<int:segment_index>/speaker` |
+| JWT 鉴权 | ✅ `@jwt_required()` |
+
+**请求体**：
+```json
+{ "speaker": "张三" }
+```
+
+---
+
+#### `POST /record/<int:record_id>/segment/<int:segment_index>/split` — 执行段内智能切分
+
+| 属性 | 值 |
+|------|----|
+| HTTP 方法 | `POST` |
+| URL | `/record/<int:record_id>/segment/<int:segment_index>/split` |
+| JWT 鉴权 | ✅ `@jwt_required()` |
+
+**请求参数**：
+- `split_offset`: (float) 相对于该分段起始点的切分时刻（秒）
+
+**逻辑说明**：
+1. 使用 FFmpeg 对原分段 WAV 进行物理切分。
+2. 调用 Python ASR 引擎（`--asr_only` 模式）对产生的两个新分段进行秒级重转写。
+3. 更新数据库 `DialogueSegment` 与 `Split` 记录，并对后续序号执行自增平移。
 | 索引越界 | `404 Not Found` | `{"code": 404, "message": "片段索引越界"}` |
 | 无权访问 | `403 Forbidden` | `{"code": 403, "message": "无权访问该记录"}` |
 
@@ -511,7 +579,36 @@ User (1) ───────────────────── (0..N) 
 
 ---
 
-### 3.3 Dashboard 接口（`routes.py:571-857`）
+### 3.3 声纹库管理蓝图 API (`app/routes.py`)
+
+#### `POST /api/voiceprint/enroll` — 声纹注册/入库
+- **功能**：由用户提供样本音频和姓名，后端调用 CAM++ 模型提取 192 维特征向量并保存为 `.npy` 文件。
+- **存储路径**：`static/voiceprints/{user_id}/{uuid}.npy`
+
+#### `GET /api/voiceprint/list` — 获取声纹列表
+- **功能**：返回当前用户声纹库中所有已注册成员的姓名、入库时间等元数据。
+
+#### `PUT /api/voiceprint/<int:vp_id>` — 修改声纹信息（含历史同步）
+- **功能**：更新说话人姓名。
+- **核心逻辑**：修改姓名后，系统会自动触发全局扫描，将该用户下所有历史记录（`DialogueSegment` 和 `Split`）中匹配旧姓名的标签同步更新。
+
+#### `DELETE /api/voiceprint/<int:vp_id>` — 从声纹库删除记录
+- **功能**：从数据库移除声纹，并物理删除对应的 `.npy` 特征文件。
+
+#### `GET /api/voiceprint/<int:vp_id>/history` — 身份参与历史
+- **功能**：查询该特定说话人在所有音频记录中的出现情况。
+- **返回内容**：记录标题、上传时间、在该音频中的发言段落总数 (segment_count)。
+
+#### `GET /api/voiceprint/match_suggestions/<int:record_id>` — 获取匹配建议
+- **算法**：余弦相似度 (Cosine Similarity)。
+- **逻辑**：将录音中提取的 `RecordSpeaker` 特征与用户声纹库逐一比对，相似度 > 0.65 时推荐匹配。
+
+#### `POST /api/voiceprint/apply_mapping/<int:record_id>` — 执行身份映射转换
+- **功能**：接收用户确认的映射表 (如 `{"spk0": "张三"}`), 执行批量 SQL `UPDATE` 替换标签。
+
+---
+
+### 3.4 Dashboard 接口（`routes.py:571-857`）
 
 #### `GET /api/dashboard/health` — AI 引擎健康检测
 
@@ -706,7 +803,11 @@ for m in merged:
     punc_res2 = self.punc_model.generate(input=m["text"])
     m["text"] = 再次清洗(punc_res2)
 
-# step 4: 说话人标签归一化
+# step 4: [新增] 提取并保存各说话人声纹特征 (embedding)
+# 遍历 merged 中独特的 speaker 标签，从 separated 目录读取首个分段提取 192 维特征
+# 将特征保存为 static/record_speakers/{rec_id}/{spk}.npy
+
+# step 5: 说话人标签归一化
 merged = self._normalize_speaker_labels(merged)
 
 # step 5: 输出 JSON 到 stdout
@@ -1023,8 +1124,10 @@ Timeout: (connect=10s, read=120s)
  │                            │                              │                           │  3D-Speaker推理
  │                            │                              │                           │─逐段 Paraformer B管线 ASR
  │                            │                              │                           │─标点恢复 (punc_model)
+ │                            │                              │                           │─[新增] 提取 SPK 192D Embedding
  │                            │                              │◄─stdout JSON数组────────  │
  │                            │                              │─copy分段文件              │
+ │                            │                              │─存储 RecordSpeaker 表     │
  │                            │                              │─写 DialogueSegment/Split  │
  │                            │                              │─status=success+commit     │
  │                            │                              │─删除临时文件              │

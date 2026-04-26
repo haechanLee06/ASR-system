@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
@@ -14,4 +15,7 @@ class Config:
     # 高德地图天气 API Key（免费申请：https://lbs.amap.com/）
     # 配置后 /api/dashboard/ambient 可返回真实天气；留空则返回默认占位值
     AMAP_KEY = os.environ.get("AMAP_KEY", "")
+
+    # JWT 配置
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(days=30)
 
