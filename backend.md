@@ -29,7 +29,8 @@ my_voice_project/
 │   │   ├── ai_service.py           # AI推理核心（AIServiceRunner类）
 │   │   ├── audio_handler.py        # 音频处理（上传保存/FFmpeg转码）
 │   │   ├── diarization.py          # 说话人分割（3D-Speaker封装）
-│   │   └── llm_service.py          # 大模型服务（Ollama流式请求）
+│   │   ├── llm_service.py          # 大模型服务（Ollama流式请求）
+│   │   └── voiceprint_service.py   # 声纹特征提取独立服务（CAM++调用）
 │   │
 │   ├── utils/
 │   │   └── wsl_bridge.py           # Windows/WSL跨平台执行桥接
@@ -71,19 +72,19 @@ my_voice_project/
 │  └─────────────┘  └─────────────────┬────────────────────────────┘  │
 │                                     │                                │
 │  ┌──────────────────────────────────▼─────────────────────────────┐ │
-│  │                    Services 服务层                               │ │
-│  │  audio_handler.py │ ai_service.py │ diarization.py │ llm_service │ │
+│  │                          Services 服务层                         │ │
+│  │ ai_service | audio_handler | diarization | llm_service | vp_svc│ │
 │  └──────────────────────────────────┬─────────────────────────────┘ │
 │                                     │                                │
 │  ┌──────────────────────────────────▼─────────────────────────────┐ │
-│  │              SQLAlchemy ORM + SQLite (voice_data.db)            │ │
-│  │ User | AudioRecord | DialogueSegment | Split | VoicePrint | RS  │ │
+│  │              SQLAlchemy ORM + SQLite (voice_data.db)             │ │
+│  │User|AudioRecord|DialogueSegment|Split|SystemSession|VoicePrint|RS│ │
 │  └─────────────────────────────────────────────────────────────────┘ │
 │                                     │                                │
 │  ┌──────────────────────────────────▼─────────────────────────────┐ │
 │  │              外部进程层（subprocess / threading）                │ │
 │  │  FFmpeg(转码) │ FunASR(四川话ASR) │ 3D-Speaker(说话人分割)       │ │
-│  │  Ollama:11434 (qwen-sichuan-psych LLM)                         │ │
+│  │  CAM++(声纹特征) │ Ollama:11434 (qwen-sichuan-psych LLM)         │ │
 │  └─────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -145,6 +146,8 @@ my_voice_project/
 | `duration` | `db.Float` | `REAL` | ✅ 可为空 | `0.0` | 音频时长（秒），FFprobe 或 wave 模块读取 |
 | `upload_time` | `db.DateTime` | `DATETIME` | ✅ 可为空 | `datetime.utcnow` | 记录创建时间（UTC） |
 | `status` | `db.String(20)` | `VARCHAR(20)` | ✅ 可为空 | `"pending"` | 任务状态：`pending` / `processing` / `success` / `failed` |
+| `title` | `db.String(256)` | `VARCHAR(256)` | ✅ 可为空 | NULL | 用户自定义的录音记录名称 |
+| `updated_at` | `db.DateTime` | `DATETIME` | ✅ 可为空 | `utcnow` | 记录最后一次更新的时间（onupdate触发） |
 | `error_message` | `db.Text` | `TEXT` | ✅ 可为空 | NULL | 失败时的错误信息 |
 | `current_stage` | `db.String(100)` | `VARCHAR(100)` | ✅ 可为空 | `"等待处理"` | 细粒度阶段描述，前端轮询展示（如"正在转码音频格式..."） |
 | `llm_summary` | `db.Text` | `TEXT` | ✅ 可为空 | NULL | LLM 生成的 JSON 格式心理分析报告（序列化字符串） |
@@ -224,7 +227,20 @@ my_voice_project/
 
 ---
 
-### 2.8 E-R 关系汇总
+### 2.8 表 7：`system_session`（对应模型类 `SystemSession`）
+
+**SQLAlchemy 定义文件**：`app/models.py:57-65`
+
+| 字段名 | SQLAlchemy 类型 | 物理类型 | Nullable | Default | 说明 |
+|--------|-----------------|----------|----------|---------|------|
+| `id` | `db.Integer` | `INTEGER` | NOT NULL | 自增 | 主键 |
+| `user_id` | `db.Integer, ForeignKey("user.id")` | `INTEGER` | NOT NULL | — | 关联用户，用户级在线状态跟踪 |
+| `start_time` | `db.DateTime` | `DATETIME` | ✅ 可为空 | `utcnow` | 会话开始时刻 |
+| `end_time` | `db.DateTime` | `DATETIME` | ✅ 可为空 | `utcnow` | 会话结束时刻（由前端心跳定时刷新） |
+
+---
+
+### 2.9 E-R 关系汇总
 
 ```
 User (1) ──────────────────── (0..N) AudioRecord
@@ -440,6 +456,27 @@ AudioRecord (1) ────────────── (0..N) RecordSpeaker
 
 ---
 
+#### `PUT /record/<int:record_id>/title` — 修改录音自定义标题
+
+| 属性 | 值 |
+|------|----|
+| HTTP 方法 | `PUT` |
+| URL | `/record/<int:record_id>/title` |
+| JWT 鉴权 | ✅ `@jwt_required()` |
+| Content-Type | `application/json` |
+
+**请求体**：
+```json
+{ "title": "客户投诉服务态度录音" }
+```
+
+| 场景 | HTTP 状态码 | 响应 JSON |
+|------|------------|-----------|
+| 修改成功 | `200 OK` | `{"code": 200, "message": "Title updated successfully", "data": {"id": 42, "title": "...", "updated_at": "..."}}` |
+| 缺少 title 字段 | `400 Bad Request` | `{"code": 400, "message": "Missing 'title' field"}` |
+
+---
+
 #### `PUT /record/<int:record_id>/segment/<int:segment_index>` — 用户修改分段文本
 
 | 属性 | 值 |
@@ -608,7 +645,24 @@ AudioRecord (1) ────────────── (0..N) RecordSpeaker
 
 ---
 
-### 3.4 Dashboard 接口（`routes.py:571-857`）
+### 3.4 Dashboard 接口（`routes.py`）
+
+#### `POST /api/system/heartbeat` — 系统活跃心跳打卡
+
+| 属性 | 值 |
+|------|----|
+| HTTP 方法 | `POST` |
+| URL | `/api/system/heartbeat` |
+| JWT 鉴权 | ✅ `@jwt_required()` |
+
+**业务逻辑**：前端每隔 30 秒发起一次请求。后端校验如果该用户最近一次会话的 `end_time` 距离当前时间小于 60 秒，则更新该 `end_time`；否则，新建一条 `SystemSession` 记录。这用于精确统计 Dashboard 的有效工作时长（Uptime）。
+
+**响应体**：
+```json
+{"code": 200, "msg": "Heartbeat received"}
+```
+
+---
 
 #### `GET /api/dashboard/health` — AI 引擎健康检测
 
@@ -892,6 +946,21 @@ def _win_to_wsl(p: str) -> str:
 
 ---
 
+### 4.4 声纹特征提取独立服务（`voiceprint_service.py`）
+
+为了实现更精准的声纹入库与比对，系统在原有 3D-Speaker Diarization 的基础上，抽离出了专门的特征提取微服务。
+
+**核心函数**：`extract_embedding(audio_path)`
+- **逻辑**：加载 16kHz WAV 音频，通过 `torchaudio` 验证和重采样。
+- **预处理**：执行音频能量检测 (`energy = np.mean(np.abs(wav.numpy()))`)。若 `< 0.001`，则抛出 `ValueError("音频过轻或为空")` 拒绝提取，防止特征污染。
+- **模型推理**：调用 3D-Speaker 底层的 CAM++ 特征提取器（`embedding_model`），产生 192 维的高阶特征表示，并执行 L2 归一化。
+- **返回值**：归一化后的 `List[float]`（192 维）。
+
+**跨平台桥接 (WSL)**：
+该服务入口与 `ai_service.py` 类似，若检测到宿主操作系统为 Windows，则自动调用 `wsl_bridge.run_in_wsl("app/services/voiceprint_service.py", audio_path)` 进入 WSL 环境推理，再通过 `json.loads` 解析子进程的 stdout，确保环境隔离带来的兼容性。
+
+---
+
 ## 第五章：跨平台执行桥接（`wsl_bridge.py`）
 
 ### 5.1 核心判断逻辑
@@ -1153,6 +1222,26 @@ Timeout: (connect=10s, read=120s)
  │                          │─_ensure_structure()                │
  │                          │─AudioRecord.llm_summary=json+commit│
  │◄──{summary JSON}─────────│                                    │
+```
+
+### 8.3 声纹库注册入库时序 (Voiceprint Enrollment)
+
+```text
+前端                      Flask主线程                     AI引擎(WSL - voiceprint_service)
+ │                            │                                     │
+ │─POST /api/voiceprint/enroll(含音频与姓名)                        │
+ │                            │─保存临时音频文件                    │
+ │                            │─run_in_wsl(voiceprint_service.py)──►│
+ │                            │                                     │─torchaudio加载验证与16kHz重采样
+ │                            │                                     │─静音检测(能量 < 0.001 抛异常)
+ │                            │                                     │─CAM++ 模型推理提取 192D Embedding
+ │                            │                                     │─L2 特征归一化
+ │                            │◄─stdout JSON (含 embedding 数组)────│
+ │                            │─生成 {UUID}.npy 文件                │
+ │                            │─保存至 static/voiceprints/{uid}/    │
+ │                            │─创建 VoicePrint 数据库记录          │
+ │                            │─清理临时音频文件                    │
+ │◄──{code: 200, "声纹注册成功"}│                                     │
 ```
 
 ---
